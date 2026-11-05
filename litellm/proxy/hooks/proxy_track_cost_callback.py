@@ -9,7 +9,6 @@ from types import MappingProxyType
 from typing import TYPE_CHECKING, Final, Protocol, TypeAlias, cast
 
 from pydantic import TypeAdapter, ValidationError
-from typing_extensions import NotRequired, ReadOnly, TypedDict
 
 import litellm
 from litellm._logging import verbose_proxy_logger
@@ -39,7 +38,6 @@ from litellm.proxy.auth.auth_checks import (
 from litellm.proxy.auth.route_checks import RouteChecks
 from litellm.proxy.db.db_lookup_gate import DBLookupDeadlineExceeded
 from litellm.proxy.db.db_spend_update_writer import (
-    ACCOUNTING_LEDGER_KWARG,
     DBSpendUpdateWriter,
     debitable_model_access_groups,
     get_llm_router,
@@ -659,7 +657,6 @@ class _ProxyDBLogger(CustomLogger):
 
         token: Final = LiteLLMProxyRequestSetup.get_logged_api_key(user_api_key_dict)
         end_user_id: Final = None if litellm.disable_end_user_cost_tracking else user_api_key_dict.end_user_id
-        accounting_rows: Final = tuple((cost, dict(row)) for cost, row in spend_rows)
         charged: Final = [
             await self._spend_writer().update_database(
                 token=token,
@@ -667,17 +664,17 @@ class _ProxyDBLogger(CustomLogger):
                 user_id=user_api_key_dict.user_id,
                 end_user_id=end_user_id,
                 team_id=user_api_key_dict.team_id,
-                kwargs=row_kwargs,
+                kwargs=dict(row_kwargs),
                 completion_response=original_exception,
                 start_time=start_time,
                 end_time=datetime.now(),
                 org_id=user_api_key_dict.org_id,
                 project_id=user_api_key_dict.project_id,
             )
-            for row_cost, row_kwargs in accounting_rows
+            for row_cost, row_kwargs in spend_rows
         ]
         counted_rows: Final = tuple(
-            row for row, row_charged in zip(accounting_rows, charged, strict=True) if row_charged and row[0] > 0
+            row for row, row_charged in zip(spend_rows, charged, strict=True) if row_charged and row[0] > 0
         )
         if counted_rows and not ProxyUpdateSpend.disable_spend_updates():
             await self._increment_failure_spend_counters(
@@ -749,14 +746,12 @@ class _ProxyDBLogger(CustomLogger):
                 org_id=user_api_key_dict.org_id,
                 end_user_id=end_user_id,
                 tags=_get_request_tags_for_cost_tracking(sl_object=sl_object, metadata=dict(metadata)),
-                request_started_at=start_time,
                 model_access_groups=debitable_model_access_groups(
                     attributed=get_request_model_access_groups(row_kwargs),
                     served_model_id=served_model_id if isinstance(served_model_id, str) else None,
                     router=get_llm_router(),
                 ),
                 project_id=user_api_key_dict.project_id,
-                **_ledger_counter_options(row_kwargs.get(ACCOUNTING_LEDGER_KWARG)),
             )
         except Exception:  # noqa: BLE001  # one row's counter failure must not keep the other rows' counters from landing
             verbose_proxy_logger.exception("Failed to raise spend counters for a failure spend row")
@@ -1200,14 +1195,6 @@ def _get_request_tags_for_cost_tracking(
     return None
 
 
-class _LedgerCounterOptions(TypedDict):
-    windows_from_ledger: ReadOnly[NotRequired[bool]]
-
-
-def _ledger_counter_options(ledger: object) -> _LedgerCounterOptions:
-    return {"windows_from_ledger": True} if ledger is True else {}
-
-
 class _ChargeSpend(Protocol):
     async def __call__(
         self,
@@ -1265,10 +1252,8 @@ class _IncrementSpendCounters(Protocol):
         budget_reservation: dict[str, object] | None = None,
         end_user_id: str | None = None,
         tags: list[str] | None = None,
-        request_started_at: datetime | None = None,
         model_access_groups: Sequence[str] | None = None,
         project_id: str | None = None,
-        windows_from_ledger: bool = False,
     ) -> None: ...
 
 
@@ -1403,10 +1388,8 @@ async def _update_database_and_spend_counters_in_batch(
             budget_reservation=budget_reservation,
             end_user_id=end_user_id,
             tags=request_tags,
-            request_started_at=start_time,
             model_access_groups=model_access_groups,
             project_id=project_id,
-            **_ledger_counter_options(_BATCH_CALLBACK_FIELDS.validate_python(kwargs).get(ACCOUNTING_LEDGER_KWARG)),
         )
     except Exception:
         if budget_reservation is not None:

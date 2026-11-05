@@ -10,12 +10,10 @@ from pydantic import TypeAdapter, ValidationError
 from litellm.constants import (
     BILLED_RETRY_ATTEMPT_METADATA_KEY,
     INTERNAL_CALL_ORIGIN_METADATA_KEY,
-    MODEL_INSIGHTS_DEFAULT_TASK,
-    MODEL_INSIGHTS_TASK_TAG_PREFIX,
 )
 from litellm.litellm_core_utils.llm_cost_calc.guardrail_cost import GuardrailCostByUnitEntry
 from litellm.proxy.db.daily_spend_bulk_upsert import DAILY_SPEND_TABLES, daily_spend_entity_ids
-from litellm.proxy.db.model_insights_tasks import load_model_insight_tasks
+from litellm.proxy.db.model_insights_tasks import model_insight_task_type
 from litellm.proxy.db.model_usage_rollup import date_from_start_time
 from litellm.proxy.route_llm_request import ROUTE_ENDPOINT_MAPPING
 from litellm.proxy.spend_tracking.compression_savings import extract_compression_saved_tokens
@@ -26,7 +24,6 @@ _FIELDS: Final = TypeAdapter(dict[str, object])
 _STRINGS: Final = TypeAdapter(tuple[str, ...])
 _VALUES: Final = TypeAdapter(tuple[object, ...])
 _ROWS: Final = TypeAdapter(tuple[dict[str, object], ...])
-_TASK_TYPES: Final = frozenset(load_model_insight_tasks())
 _MAX_INDEXED_TEXT_BYTES: Final = 2000
 _MAX_COUNTER: Final = 2**40
 
@@ -238,7 +235,7 @@ def _model_contributions(row: Mapping[str, object], metadata: Mapping[str, objec
                 ("model_group", _text(row.get("model_group")) or model),
                 ("model", model),
                 ("custom_llm_provider", _text(row.get("custom_llm_provider")) or "unknown"),
-                ("task_type", _model_task(row)),
+                ("task_type", model_insight_task_type(_tags(row))),
             ),
             (
                 ("spend", _number(row.get("spend"))),
@@ -303,18 +300,6 @@ def _guardrail_unit(
             ("usage_unit", unit),
         ),
         (("units", units), ("cost", cost or 0.0), ("untracked_units", units if cost is None else 0)),
-    )
-
-
-def _model_task(row: Mapping[str, object]) -> str:
-    return next(
-        (
-            task
-            for tag in _tags(row)
-            if tag.startswith(MODEL_INSIGHTS_TASK_TAG_PREFIX)
-            and (task := tag.removeprefix(MODEL_INSIGHTS_TASK_TAG_PREFIX)) in _TASK_TYPES
-        ),
-        MODEL_INSIGHTS_DEFAULT_TASK,
     )
 
 

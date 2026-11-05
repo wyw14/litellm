@@ -1,16 +1,10 @@
 import asyncio
-from unittest.mock import Mock
-from litellm.proxy.utils import get_redoc_url, get_docs_url
-
-import pytest
-from fastapi import Request
-
-import litellm
-from unittest.mock import MagicMock, patch, AsyncMock
-
+import math
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import httpx
-import math
+import pytest
+
 from litellm.constants import SPEND_LOG_WRITE_BATCH_MAX_ROWS
 from litellm.proxy.utils import update_spend
 
@@ -36,7 +30,6 @@ class MockPrismaClient:
         self.spend_log_transactions = []
         self.daily_user_spend_transactions = {}
         self.tool_usage_transactions = []
-        self.model_usage_transactions = []
         self.autorouter_turn_transactions = []
         self.baseline_accounting_transactions = []
         self.baseline_accounting_lock = asyncio.Lock()
@@ -50,15 +43,10 @@ class MockPrismaClient:
         self._spend_log_transactions_lock = asyncio.Lock()
         self.spend_log_write_lock = asyncio.Lock()
         self._tool_usage_transactions_lock = asyncio.Lock()
-        self._model_usage_transactions_lock = asyncio.Lock()
         self._autorouter_turn_transactions_lock = asyncio.Lock()
 
     def jsonify_object(self, obj):
         return obj
-
-    def add_spend_log_transaction_to_daily_user_transaction(self, payload):
-        # Mock implementation
-        pass
 
 
 def create_mock_proxy_logging():
@@ -296,7 +284,6 @@ async def test_update_spend_logs_multiple_batches_with_failure():
         # Fail on the second batch's first attempt
         if call_count == 2:
             raise httpx.ConnectError("Failed to connect")
-        return None
 
     create_many_mock = AsyncMock(side_effect=create_many_side_effect)
     prisma_client.db.litellm_spendlogs.create_many = create_many_mock

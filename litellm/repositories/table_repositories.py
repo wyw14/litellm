@@ -191,13 +191,6 @@ class SpendLogsRepository(PrismaTableRepository["prisma_models.LiteLLM_SpendLogs
         )
         return frozenset(str(row["request_id"]) for row in rows)
 
-    async def has_delivery(self, delivery_id: str) -> bool:
-        database: Final[LedgerTransaction] = self.prisma_client.writer_db
-        rows: Final = await database.query_raw(
-            'SELECT 1 FROM "LiteLLM_SpendLogDelivery" WHERE delivery_id = $1', delivery_id
-        )
-        return bool(rows)
-
 
 class BudgetWindowSpendRepository(PrismaTableRepository["prisma_models.LiteLLM_BudgetWindowSpend"]):
     table_name = "litellm_budgetwindowspend"

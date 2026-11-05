@@ -6,6 +6,7 @@ from typing import Final
 import pytest
 from pydantic import TypeAdapter
 
+import litellm
 from litellm.accounting.projection import project
 from litellm.accounting.snapshot import build_accounting_payload
 from litellm.constants import BILLED_RETRY_ATTEMPT_METADATA_KEY, INTERNAL_CALL_ORIGIN_METADATA_KEY
@@ -14,7 +15,7 @@ from litellm.proxy.db.db_spend_update_writer import DBSpendUpdateWriter
 from litellm.proxy.proxy_server import proxy_logging_obj
 from litellm.proxy.spend_tracking.spend_tracking_utils import get_logging_payload
 from litellm.proxy.utils import PrismaClient
-from litellm.types.utils import ModelResponse, Usage
+from litellm.types.utils import BACKGROUND_RESPONSE_COST_POLL_CALL_ORIGIN, ModelResponse, Usage
 
 _NOW: Final = datetime(2026, 11, 2, tzinfo=timezone.utc)
 _FIELDS: Final = TypeAdapter(dict[str, object])
@@ -24,7 +25,9 @@ _FIELDS: Final = TypeAdapter(dict[str, object])
 @pytest.mark.parametrize("origin", [None, "auto_router", "billed_retry"])
 @pytest.mark.parametrize("spend", [0.0, 0.25])
 @pytest.mark.asyncio
-async def test_daily_projection_matches_legacy_writer(status: str, origin: str | None, spend: float) -> None:
+async def test_daily_projection_counts_requests_only_for_the_caller(
+    status: str, origin: str | None, spend: float
+) -> None:
     payload: Final = get_logging_payload(
         kwargs={
             "model": "projection-test",
@@ -45,10 +48,6 @@ async def test_daily_projection_matches_legacy_writer(status: str, origin: str |
         **({INTERNAL_CALL_ORIGIN_METADATA_KEY: origin} if origin not in (None, "billed_retry") else {}),
     }
     row: Final = {**payload, "spend": spend, "metadata": json.dumps(metadata), "request_duration_ms": 25}
-    legacy: Final = await DBSpendUpdateWriter()._common_add_spend_log_transaction_to_daily_transaction(
-        row, PrismaClient(database_url="postgresql://unused", proxy_logging_obj=proxy_logging_obj), "user"
-    )
-    assert legacy is not None
     accounting_input: Final[SpendLogsPayload] = {**row}
     accounting: Final = build_accounting_payload(
         accounting_input,
@@ -59,9 +58,27 @@ async def test_daily_projection_matches_legacy_writer(status: str, origin: str |
     )
     restored: Final = _FIELDS.validate_json(json.dumps(accounting, default=str))
     stored_daily: Final = next(item for item in project(restored) if item.table == "LiteLLM_DailyUserSpend")
-    assert dict(stored_daily.increments) == {name: legacy[name] for name, _ in stored_daily.increments}
-    assert dict(stored_daily.key)["date"] == legacy["date"]
-    assert dict(stored_daily.key)["api_key"] == legacy["api_key"]
+    caller: Final = origin is None
+    timed: Final = origin != "auto_router" and status == "success"
+    assert dict(stored_daily.increments) == {
+        "spend": spend,
+        "prompt_tokens": 10,
+        "completion_tokens": 5,
+        "api_requests": int(caller),
+        "successful_requests": int(caller and status == "success"),
+        "failed_requests": int(caller and status == "failure"),
+        "cache_read_input_tokens": 0,
+        "cache_creation_input_tokens": 0,
+        "compression_saved_tokens": 0,
+        "compression_savings_spend": 0.0,
+        "prompt_caching_savings_spend": 0.0,
+        "gateway_injected_caching_savings_spend": 0.0,
+        "autorouter_savings_spend": 0.0,
+        "total_response_time_ms": 25 if timed else 0,
+        "timed_requests": int(timed),
+    }
+    assert dict(stored_daily.key)["date"] == "2026-11-02"
+    assert dict(stored_daily.key)["api_key"] == payload["api_key"]
     assert not {"messages", "response", "proxy_server_request", "requester_ip_address"}.intersection(accounting)
 
 
@@ -143,17 +160,14 @@ def test_projection_carries_windows_and_does_not_reprice_guardrails() -> None:
 
 
 @pytest.mark.asyncio
-async def test_entity_projection_matches_real_request_queues(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_a_request_is_charged_once_to_every_entity_it_names(monkeypatch: pytest.MonkeyPatch) -> None:
     from litellm.proxy import proxy_server
-    from litellm.responses.streaming_iterator import drain_logging_tasks
 
     client: Final = PrismaClient(database_url="postgresql://unused", proxy_logging_obj=proxy_logging_obj)
     monkeypatch.setattr(proxy_server, "prisma_client", client)
     monkeypatch.setattr(proxy_server, "disable_spend_logs", False)
     monkeypatch.setattr(client, "spend_log_transactions", [])
-    monkeypatch.setattr(client, "model_usage_transactions", [])
-    writer: Final = DBSpendUpdateWriter()
-    charged: Final = await writer.update_database(
+    charged: Final = await DBSpendUpdateWriter().update_database(
         token="sk-projection",
         user_id="user",
         end_user_id="end-user",
@@ -187,79 +201,42 @@ async def test_entity_projection_matches_real_request_queues(monkeypatch: pytest
         end_time=_NOW,
         response_cost=0.25,
     )
-    await drain_logging_tasks()
+
     assert charged
     assert len(client.spend_log_transactions) == 1
-    queued: Final = await writer.spend_update_queue.flush_all_updates_from_in_memory_queue()
-    logged: Final[SpendLogsPayload] = client.spend_log_transactions[0]
     projected: Final = project(
-        _FIELDS.validate_json(
-            json.dumps(
-                build_accounting_payload(
-                    logged,
-                    entities={
-                        "api_key": logged["api_key"],
-                        "user": "user",
-                        "end_user": "end-user",
-                        "team_id": "team",
-                        "organization_id": "org",
-                        "project_id": "project",
-                        "agent_id": "agent",
-                    },
-                    model_access_groups=(),
-                    windows=(),
-                    router=lambda: None,
-                ),
-                default=str,
-            )
-        )
+        _FIELDS.validate_json(json.dumps(client.spend_log_transactions[0]["accounting_payload"], default=str))
     )
-    legacy: Final = {(item["entity_type"].value, item["entity_id"]): item["response_cost"] for item in queued}
-    assert legacy[("key", proxy_server.hash_token("sk-projection"))] == next(
-        dict(item.increments)["spend"] for item in projected if item.table == "LiteLLM_VerificationToken"
-    )
-    for table, entity, identity in (
-        ("LiteLLM_UserTable", "user", "user"),
-        ("LiteLLM_TeamTable", "team", "team"),
-        ("LiteLLM_OrganizationTable", "organization", "org"),
-        ("LiteLLM_EndUserTable", "end_user", "end-user"),
-        ("LiteLLM_AgentsTable", "agent", "agent"),
-        ("LiteLLM_ProjectTable", "project", "project"),
-    ):
-        assert legacy[(entity, identity)] == next(
-            dict(item.increments)["spend"] for item in projected if item.table == table
-        )
-    assert sum(dict(item.increments)["spend"] for item in projected if item.table == "LiteLLM_TagTable") == sum(
-        item["response_cost"] or 0 for item in queued if item["entity_type"].value == "tag"
-    )
-
-    daily_queues: Final = (
-        ("LiteLLM_DailyUserSpend", writer.daily_spend_update_queue),
-        ("LiteLLM_DailyTeamSpend", writer.daily_team_spend_update_queue),
-        ("LiteLLM_DailyOrganizationSpend", writer.daily_org_spend_update_queue),
-        ("LiteLLM_DailyEndUserSpend", writer.daily_end_user_spend_update_queue),
-        ("LiteLLM_DailyAgentSpend", writer.daily_agent_spend_update_queue),
-        ("LiteLLM_DailyTagSpend", writer.daily_tag_spend_update_queue),
-    )
-    for table, queue in daily_queues:
-        transactions = await queue.flush_and_get_aggregated_daily_spend_update_transactions()
-        matching = tuple(item for item in projected if item.table == table)
-        assert matching, table
-        contribution = matching[0]
-        assert len(transactions) == 1
-        transaction = next(iter(transactions.values()))
-        assert dict(contribution.increments) == {name: transaction[name] for name, _ in contribution.increments}
-    assert len(client.model_usage_transactions) == 1
-    model: Final = client.model_usage_transactions[0]
-    model_projection: Final = next(item for item in projected if item.table == "LiteLLM_DailyModelUsage")
-    assert dict(model_projection.increments) == {
-        "spend": model.spend,
-        "prompt_tokens": model.prompt_tokens,
-        "completion_tokens": model.completion_tokens,
-        "request_count": int(model.counts_as_request),
-        "successful_requests": int(model.successful),
-        "failed_requests": int(not model.successful),
+    spend_by_entity: Final = {
+        (item.table, item.key): dict(item.increments)["spend"]
+        for item in projected
+        if not item.table.startswith("LiteLLM_Daily")
     }
+    assert spend_by_entity == {
+        ("LiteLLM_VerificationToken", (("token", proxy_server.hash_token("sk-projection")),)): 0.25,
+        ("LiteLLM_UserTable", (("user_id", "user"),)): 0.25,
+        ("LiteLLM_TeamTable", (("team_id", "team"),)): 0.25,
+        ("LiteLLM_OrganizationTable", (("organization_id", "org"),)): 0.25,
+        ("LiteLLM_EndUserTable", (("user_id", "end-user"),)): 0.25,
+        ("LiteLLM_AgentsTable", (("agent_id", "agent"),)): 0.25,
+        ("LiteLLM_ProjectTable", (("project_id", "project"),)): 0.25,
+        ("LiteLLM_TagTable", (("tag_name", "tag"),)): 0.25,
+        ("LiteLLM_TeamMembership", (("team_id", "team"), ("user_id", "user"))): 0.25,
+        ("LiteLLM_OrganizationMembership", (("organization_id", "org"), ("user_id", "user"))): 0.25,
+    }
+    daily: Final = {item.table: dict(item.increments) for item in projected if item.table.startswith("LiteLLM_Daily")}
+    assert set(daily) == {
+        "LiteLLM_DailyUserSpend",
+        "LiteLLM_DailyTeamSpend",
+        "LiteLLM_DailyOrganizationSpend",
+        "LiteLLM_DailyEndUserSpend",
+        "LiteLLM_DailyAgentSpend",
+        "LiteLLM_DailyTagSpend",
+        "LiteLLM_DailyModelUsage",
+    }
+    assert all(row["spend"] == 0.25 and row["prompt_tokens"] == 10 for row in daily.values())
+    assert daily["LiteLLM_DailyModelUsage"]["request_count"] == 1
+    assert daily["LiteLLM_DailyUserSpend"]["api_requests"] == 1
 
 
 @pytest.mark.parametrize("served_id", ["requested", "fallback", "missing"])
@@ -283,17 +260,18 @@ async def test_projection_preserves_fallback_narrowed_model_access_groups(served
         ]
     )
     attributed: Final = ("first-group", "second-group", "first-group")
-    writer: Final = DBSpendUpdateWriter()
-    client: Final = PrismaClient(database_url="postgresql://unused", proxy_logging_obj=proxy_logging_obj)
-    await writer._update_model_access_group_db(0.5, attributed, served_id, client, router)
-    queued: Final = await writer.spend_update_queue.flush_all_updates_from_in_memory_queue()
     frozen_groups: Final = debitable_model_access_groups(attributed, served_id, router)
     projected: Final = project(
         {"spend": 0.5, "metadata": json.dumps({"accounting_model_access_groups": frozen_groups})}
     )
-    assert {dict(item.key)["access_group_name"]: dict(item.increments)["spend"] for item in projected} == {
-        item["entity_id"]: item["response_cost"] for item in queued
-    }
+    assert (
+        sorted((dict(item.key)["access_group_name"], dict(item.increments)["spend"]) for item in projected)
+        == {
+            "requested": [("first-group", 0.5)],
+            "fallback": [("second-group", 0.5)],
+            "missing": [("first-group", 0.5), ("second-group", 0.5)],
+        }[served_id]
+    )
     assert "unattributed" not in frozen_groups
 
 
@@ -559,3 +537,438 @@ def test_caller_supplied_savings_beyond_json_range_are_clamped_and_never_drop_th
     assert [
         dict(item.increments)["spend"] for item in project(restored) if item.table == "LiteLLM_VerificationToken"
     ] == [0.5]
+
+
+def _guarded_row(
+    request_id: str | None,
+    usage: Mapping[str, object],
+    *,
+    team_id: str | None = "team-a",
+    api_key: str = "hashed-key-1",
+    status: str = "success",
+    cost_by_unit: Mapping[str, object] | None = None,
+) -> Mapping[str, object]:
+    entry: Final = {
+        "guardrail_id": "bedrock-guard",
+        "guardrail_status": status,
+        "guardrail_usage": usage,
+        **({} if cost_by_unit is None else {"guardrail_cost_by_unit": cost_by_unit}),
+    }
+    return {
+        "request_id": request_id,
+        "startTime": "2026-08-17T12:00:00+00:00",
+        "team_id": team_id,
+        "api_key": api_key,
+        "metadata": {"guardrail_information": [entry]},
+    }
+
+
+def _guardrail_unit_rows(*rows: Mapping[str, object]) -> Mapping[tuple[str, ...], Mapping[str, int | float]]:
+    from litellm.accounting.delivery_projection import project_deliveries
+    from litellm.repositories.accounting_delivery_repository import DeliveryProjection
+
+    return {
+        tuple(value for _, value in item.key): dict(item.increments)
+        for item in project_deliveries(DeliveryProjection(row) for row in rows)
+        if item.table == "LiteLLM_DailyGuardrailUsageUnits"
+    }
+
+
+def test_guardrail_units_sum_per_guardrail_team_key_and_date_whatever_the_verdict() -> None:
+    """LIT-5650: Bedrock bills blocked invocations like passed ones, and a team-less request gets its own row."""
+    rows: Final = _guardrail_unit_rows(
+        _guarded_row("r1", {"topicPolicyUnits": 1, "contentPolicyUnits": 1}),
+        _guarded_row("r2", {"topicPolicyUnits": 1, "contentPolicyUnits": 2}, status="guardrail_intervened"),
+        _guarded_row("r3", {"topicPolicyUnits": 1}, team_id=None, api_key="hashed-key-2"),
+        _guarded_row(None, {"topicPolicyUnits": 9}),
+    )
+
+    assert {key: counters["units"] for key, counters in rows.items()} == {
+        ("bedrock-guard", "2026-08-17", "team-a", "hashed-key-1", "topicPolicyUnits"): 2,
+        ("bedrock-guard", "2026-08-17", "team-a", "hashed-key-1", "contentPolicyUnits"): 3,
+        ("bedrock-guard", "2026-08-17", "", "hashed-key-2", "topicPolicyUnits"): 1,
+    }
+
+
+def test_guardrail_cost_sums_per_counter_and_unpriced_units_stay_untracked() -> None:
+    """LIT-5652: priced units keep their subtotal while units no price covers are counted as untracked, never free."""
+    rows: Final = _guardrail_unit_rows(
+        _guarded_row(
+            "r1",
+            {"contentPolicyUnits": 1000, "wordPolicyUnits": 50},
+            cost_by_unit={"contentPolicyUnits": 0.15, "wordPolicyUnits": 0.0},
+        ),
+        _guarded_row(
+            "r2", {"contentPolicyUnits": 700, "someFutureCounter": 3}, cost_by_unit={"someFutureCounter": None}
+        ),
+        _guarded_row("r3", {"contentPolicyUnits": 300}),
+    )
+
+    by_unit: Final = {key[-1]: counters for key, counters in rows.items()}
+    assert by_unit["contentPolicyUnits"] == {"units": 2000, "cost": pytest.approx(0.15), "untracked_units": 1000}
+    assert by_unit["wordPolicyUnits"] == {"units": 50, "cost": 0.0, "untracked_units": 0}
+    assert by_unit["someFutureCounter"] == {"units": 3, "cost": 0.0, "untracked_units": 3}
+
+
+@pytest.mark.parametrize(
+    ("overrides", "counted"),
+    [
+        ({}, (1, 1, 0)),
+        ({"status": "failure"}, (1, 0, 1)),
+        ({INTERNAL_CALL_ORIGIN_METADATA_KEY: "health_check"}, None),
+        ({INTERNAL_CALL_ORIGIN_METADATA_KEY: BACKGROUND_RESPONSE_COST_POLL_CALL_ORIGIN}, (0, 0, 0)),
+    ],
+    ids=["success", "failure", "internal_call", "background_billing"],
+)
+def test_model_usage_counts_spend_always_but_requests_only_for_the_caller(
+    overrides: Mapping[str, object], counted: tuple[int, int, int] | None
+) -> None:
+    """A background response's billing row adds its spend and tokens but not a second request, and other internal
+    calls are left out of model insights entirely."""
+    metadata: Final = {key: value for key, value in overrides.items() if key != "status"}
+    row: Final = {
+        "request_id": "r",
+        "startTime": "2026-09-28T01:02:03Z",
+        "spend": 0.25,
+        "prompt_tokens": 10,
+        "completion_tokens": 20,
+        "model": "",
+        "model_group": None,
+        "custom_llm_provider": None,
+        "status": overrides.get("status", "success"),
+        "request_tags": ["task:debugging"],
+        "metadata": metadata,
+    }
+
+    usage: Final = tuple(item for item in project(row) if item.table == "LiteLLM_DailyModelUsage")
+
+    if counted is None:
+        assert usage == ()
+        return
+    (only,) = usage
+    assert dict(only.key) == {
+        "date": "2026-09-28",
+        "model_group": "unknown",
+        "model": "unknown",
+        "custom_llm_provider": "unknown",
+        "task_type": "debugging",
+    }
+    assert dict(only.increments) == {
+        "spend": 0.25,
+        "prompt_tokens": 10,
+        "completion_tokens": 20,
+        "request_count": counted[0],
+        "successful_requests": counted[1],
+        "failed_requests": counted[2],
+    }
+
+
+def _daily_user_row(payload: Mapping[str, object], status: str) -> Mapping[str, object]:
+    metadata: Final = {**_FIELDS.validate_json(str(payload["metadata"])), "status": status}
+    row: Final[SpendLogsPayload] = {
+        "endTime": payload["startTime"],
+        "model_id": None,
+        "request_tags": "[]",
+        "agent_id": None,
+        **payload,
+        "status": status,
+        "metadata": json.dumps(metadata),
+    }
+    accounting: Final = build_accounting_payload(
+        row,
+        entities={"api_key": payload["api_key"], "user": payload["user"]},
+        model_access_groups=(),
+        windows=(),
+        router=lambda: None,
+    )
+    daily: Final = next(
+        item
+        for item in project(_FIELDS.validate_json(json.dumps(accounting, default=str)))
+        if item.table == "LiteLLM_DailyUserSpend"
+    )
+    return {**dict(daily.key), **dict(daily.increments)}
+
+
+def test_daily_transaction_carries_compression_saved_tokens():
+    """
+    The daily transaction built from a SpendLog payload must carry
+    compression_saved_tokens summed from both the native compression_savings
+    metadata key and Headroom guardrail entries, alongside the cache token
+    fields extracted from usage_object.
+    """
+
+    metadata = {
+        "usage_object": {"cache_read_input_tokens": 40, "cache_creation_input_tokens": 15},
+        "litellm_gateway_injected_cache": "dep-of-the-compression-row",
+        "compression_savings": {
+            "tokens_before": 12000,
+            "tokens_after": 5000,
+            "tokens_saved": 7000,
+            "source": "compression_interception",
+        },
+        "guardrail_information": [
+            {
+                "guardrail_name": "headroom-compressor",
+                "guardrail_provider": "headroom",
+                "guardrail_status": "success",
+                "guardrail_response": {"tokens_before": 1000, "tokens_after": 400, "tokens_saved": 600},
+            }
+        ],
+    }
+    payload = {
+        "request_id": "req-compression-1",
+        "user": "test-user",
+        "startTime": "2026-07-17T00:00:00",
+        "api_key": "test-key",
+        "model": "claude-sonnet-5",
+        "custom_llm_provider": "anthropic",
+        "model_group": "claude-sonnet-5",
+        "model_id": "dep-of-the-compression-row",
+        "call_type": "anthropic_messages",
+        "prompt_tokens": 5000,
+        "completion_tokens": 10,
+        "spend": 0.05,
+        "metadata": json.dumps(metadata),
+    }
+
+    transaction = _daily_user_row(payload, "success")
+
+    assert transaction is not None
+    assert transaction["compression_saved_tokens"] == 7600
+    assert transaction["cache_read_input_tokens"] == 40
+    assert transaction["cache_creation_input_tokens"] == 15
+
+    model_info = litellm.get_model_info(model="claude-sonnet-5", custom_llm_provider="anthropic")
+    input_cost = model_info["input_cost_per_token"] or 0.0
+    cache_read_cost = model_info.get("cache_read_input_token_cost") or input_cost
+    cache_write_cost = model_info.get("cache_creation_input_token_cost") or input_cost
+    assert transaction["compression_savings_spend"] == pytest.approx(7600 * input_cost)
+    assert transaction["prompt_caching_savings_spend"] == pytest.approx(
+        40 * max(input_cost - cache_read_cost, 0.0) - 15 * (cache_write_cost - input_cost)
+    )
+    assert transaction["compression_savings_spend"] > 0
+    assert transaction["prompt_caching_savings_spend"] > 0
+
+
+@pytest.mark.parametrize(
+    "estimate, recorded_savings, expected",
+    [
+        pytest.param(None, None, -0.005, id="plain-classifier-cost"),
+        pytest.param({"version": 1, "status": "unknown"}, None, 0.0, id="unknown"),
+        pytest.param({"version": 2, "status": "unknown"}, None, 0.0, id="unknown-v2"),
+        pytest.param({"version": 1, "status": "unknown"}, -0.003, 0.0, id="unknown-stale-value"),
+        pytest.param({"version": 0, "status": "estimated"}, -0.003, 0.0, id="unsupported-version"),
+        pytest.param({"version": 1, "status": "estimated"}, -0.003, -0.003, id="estimated"),
+        pytest.param(None, -0.003, -0.003, id="legacy"),
+    ],
+)
+def test_daily_transaction_compression_saved_tokens_zero_when_absent(
+    estimate: dict[str, object] | None,
+    recorded_savings: float | None,
+    expected: float,
+) -> None:
+    """Requests without any compression metadata produce a zero count."""
+
+    payload = {
+        "request_id": "req-no-compression",
+        "user": "test-user",
+        "startTime": "2026-07-17T00:00:00",
+        "api_key": "test-key",
+        "model": "claude-sonnet-5",
+        "custom_llm_provider": "anthropic",
+        "model_group": "claude-sonnet-5",
+        "call_type": "anthropic_messages",
+        "prompt_tokens": 100,
+        "completion_tokens": 10,
+        "spend": 0.01,
+        "metadata": json.dumps(
+            {
+                "usage_object": {"prompt_tokens": 100, "completion_tokens": 10},
+                "routing_decision": {"savings_baseline_model": "anthropic/claude-sonnet-5", "classifier_cost": 0.005},
+                "autorouter_savings": recorded_savings,
+                "autorouter_savings_estimate": estimate,
+            }
+        ),
+    }
+
+    transaction = _daily_user_row(payload, "success")
+
+    assert transaction is not None
+    assert transaction["compression_saved_tokens"] == 0
+    assert transaction["compression_savings_spend"] == 0
+    assert transaction["prompt_caching_savings_spend"] == 0
+    assert transaction["spend"] == 0.01
+    assert transaction["autorouter_savings_spend"] == expected
+
+
+def test_daily_transaction_internal_call_keeps_spend_but_not_request_counts():
+    """Internal sub-calls (auto-router classifier, shadow eval's shadow and judge) bill
+    spend and tokens to the key but are not requests the caller made: api_requests,
+    successful_requests, and autorouter_savings_spend must all stay zero for them."""
+
+    def _payload(metadata: dict) -> dict:
+        return {
+            "request_id": "req-internal-1",
+            "user": "test-user",
+            "startTime": "2026-08-11T00:00:00",
+            "api_key": "test-key",
+            "model": "claude-sonnet-5",
+            "custom_llm_provider": "anthropic",
+            "model_group": "claude-sonnet-5",
+            "call_type": "acompletion",
+            "prompt_tokens": 100,
+            "completion_tokens": 10,
+            "spend": 0.05,
+            "metadata": json.dumps(metadata),
+        }
+
+    internal = _daily_user_row(_payload({"internal_call_origin": "shadow_eval_judge"}), "success")
+    user_sent = _daily_user_row(_payload({}), "success")
+
+    assert internal is not None and user_sent is not None
+    assert internal["spend"] == 0.05
+    assert internal["prompt_tokens"] == 100
+    assert internal["api_requests"] == 0
+    assert internal["successful_requests"] == 0
+    assert internal["failed_requests"] == 0
+    assert internal["autorouter_savings_spend"] == 0.0
+    assert user_sent["api_requests"] == 1
+    assert user_sent["successful_requests"] == 1
+
+
+def _response_time_payload(request_duration_ms: object, metadata: dict | None = None) -> dict:
+    return {
+        "request_id": "req-timed-1",
+        "user": "test-user",
+        "startTime": "2026-09-15T00:00:00",
+        "api_key": "test-key",
+        "model": "gpt-5.5",
+        "custom_llm_provider": "openai",
+        "model_group": "gpt-5.5",
+        "call_type": "acompletion",
+        "prompt_tokens": 10,
+        "completion_tokens": 5,
+        "spend": 0.01,
+        "request_duration_ms": request_duration_ms,
+        "metadata": json.dumps(metadata or {}),
+    }
+
+
+@pytest.mark.parametrize("request_duration_ms", [1234, 0])
+def test_daily_transaction_rolls_up_response_time_for_successful_requests(request_duration_ms: int):
+    """A successful user-sent request contributes its request_duration_ms to the daily
+    response-time sum and counts as one timed request, including a 0 ms duration."""
+
+    transaction = _daily_user_row(_response_time_payload(request_duration_ms), "success")
+
+    assert transaction is not None
+    assert transaction["total_response_time_ms"] == request_duration_ms
+    assert transaction["timed_requests"] == 1
+
+
+@pytest.mark.parametrize(
+    ("request_status", "request_duration_ms", "metadata"),
+    [
+        ("failure", 1234, {}),
+        ("success", None, {}),
+        ("success", -5, {}),
+        ("success", "1234", {}),
+        ("success", 1234, {"internal_call_origin": "shadow_eval_judge"}),
+    ],
+    ids=["failed", "missing", "negative", "non_int", "internal_call"],
+)
+def test_daily_transaction_excludes_untimed_requests_from_response_time(
+    request_status: str, request_duration_ms: object, metadata: dict
+):
+    """Failed, internal, and missing/invalid-duration requests never enter the response-time
+    average: both the duration sum and the timed_requests denominator stay at zero."""
+
+    transaction = _daily_user_row(_response_time_payload(request_duration_ms, metadata), request_status)
+
+    assert transaction is not None
+    assert transaction["total_response_time_ms"] == 0
+    assert transaction["timed_requests"] == 0
+
+
+@pytest.mark.parametrize(
+    "injected_deployment, attributed",
+    [
+        pytest.param("dep-of-this-row", True, id="this-deployment-injected"),
+        pytest.param("dep-of-a-sibling-leg", False, id="a-sibling-deployment-injected"),
+        pytest.param("", True, id="injected-before-a-deployment-was-chosen"),
+    ],
+)
+def test_caching_savings_are_attributed_to_the_deployment_that_was_injected(injected_deployment, attributed):
+    """Retries, same-group failover and cross-model-group fallbacks all reuse one metadata
+    bucket and one litellm_call_id, so a marker written by the leg that injected is
+    visible to every sibling and nothing request-scoped can tell them apart.
+
+    Naming the deployment it injected for is what keeps the credit on that leg: a row
+    billed for a different deployment reads it as no injection, so no seam has to strip
+    it and a deployment that injected nothing is never credited for the one that did.
+
+    An injection that ran before any deployment was chosen, which is what the proxy does
+    for prompt templates, is written into the payload every leg goes on to send, so it
+    marks the request for all of them and each leg keeps the credit.
+    """
+
+    payload = {
+        "request_id": "req-fallback-leg",
+        "user": "test-user",
+        "startTime": "2026-07-17T00:00:00",
+        "api_key": "test-key",
+        "model": "claude-sonnet-5",
+        "custom_llm_provider": "anthropic",
+        "model_group": "claude-sonnet-5",
+        "model_id": "dep-of-this-row",
+        "call_type": "anthropic_messages",
+        "prompt_tokens": 5000,
+        "completion_tokens": 10,
+        "spend": 0.05,
+        "metadata": json.dumps(
+            {
+                "usage_object": {"cache_read_input_tokens": 4242, "cache_creation_input_tokens": 1111},
+                "litellm_gateway_injected_cache": injected_deployment,
+            }
+        ),
+    }
+
+    transaction = _daily_user_row(payload, "success")
+
+    assert transaction is not None
+    assert transaction["prompt_caching_savings_spend"] != 0.0
+    assert (transaction["gateway_injected_caching_savings_spend"] != 0.0) is attributed
+
+
+def test_daily_transaction_attributes_caching_savings_only_with_an_injection_marker():
+    """Cached usage with no litellm_gateway_injected_cache marker is still a real saving.
+
+    Client-sent cache_control and implicit provider caching leave no marker, so the row
+    keeps the total the customer actually got while the gateway-attributed column stays
+    empty, which is what separates what caching saved from what litellm can claim.
+    """
+
+    payload = {
+        "request_id": "req-ungated-caching",
+        "user": "test-user",
+        "startTime": "2026-07-17T00:00:00",
+        "api_key": "test-key",
+        "model": "claude-sonnet-5",
+        "custom_llm_provider": "anthropic",
+        "model_group": "claude-sonnet-5",
+        "call_type": "anthropic_messages",
+        "prompt_tokens": 5000,
+        "completion_tokens": 10,
+        "spend": 0.05,
+        "metadata": json.dumps(
+            {"usage_object": {"cache_read_input_tokens": 4242, "cache_creation_input_tokens": 1111}}
+        ),
+    }
+
+    transaction = _daily_user_row(payload, "success")
+
+    assert transaction is not None
+    assert transaction["cache_read_input_tokens"] == 4242
+    assert transaction["cache_creation_input_tokens"] == 1111
+    assert transaction["prompt_caching_savings_spend"] != 0.0
+    assert transaction["gateway_injected_caching_savings_spend"] == 0.0

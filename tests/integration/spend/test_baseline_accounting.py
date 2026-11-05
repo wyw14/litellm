@@ -309,6 +309,7 @@ async def test_native_observation_enters_spend_pipeline_once_with_shared_daily_a
 ) -> None:
     import os
 
+    from litellm.accounting.projection import project
     from litellm.proxy.common_utils.user_api_key_cache import UserApiKeyCache
     from litellm.proxy.db.db_spend_update_writer import DBSpendUpdateWriter
     from litellm.proxy.utils import PrismaClient, ProxyLogging
@@ -328,10 +329,13 @@ async def test_native_observation_enters_spend_pipeline_once_with_shared_daily_a
         assert [(target.entity, target.entity_id) for target in queued.daily.targets] == [
             ("user", None), ("team", ""), ("org", "org"), ("tag", "tag"),
         ]
-        await writer.add_spend_log_transaction_to_daily_tag_transaction(payload, client)
-        actual_tags: Final = await writer.daily_tag_spend_update_queue.flush_and_get_aggregated_daily_spend_update_transactions()
+        actual_tags: Final = tuple(
+            item
+            for item in project({**payload, "metadata": json.loads(payload["metadata"])})
+            if item.table == "LiteLLM_DailyTagSpend"
+        )
         assert len(actual_tags) == 1
-        assert next(iter(actual_tags.values()))["spend"] == 0.17
+        assert dict(actual_tags[0].increments)["spend"] == 0.17
         durable: Final = BaselineAccountingStore.for_client(client)
         anchor: Final = record("anchor", 9999.0)
         await _log(db, anchor)

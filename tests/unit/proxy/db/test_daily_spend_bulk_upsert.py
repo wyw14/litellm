@@ -1,8 +1,6 @@
 """Tests for the single-statement daily spend upsert (LIT-5291)."""
 
 import re
-from collections.abc import AsyncIterator
-from contextlib import AbstractAsyncContextManager, asynccontextmanager
 
 import pytest
 
@@ -12,8 +10,6 @@ from litellm.proxy.db.daily_spend_bulk_upsert import (
     conflict_key,
     merge_by_conflict_key,
 )
-from litellm.proxy.db.db_spend_update_writer import DBSpendUpdateWriter
-from litellm.proxy.db.rollup_lock_timeout import ROLLUP_LOCK_TIMEOUT_SQL
 
 TAG_TABLE = DAILY_SPEND_TABLES["tag"]
 USER_TABLE = DAILY_SPEND_TABLES["user"]
@@ -143,68 +139,3 @@ def test_non_tag_tables_carry_no_request_id_column():
     assert "request_id" not in sql
     assert '"user_id"' in sql
 
-
-class _RecordingDb:
-    def __init__(self) -> None:
-        self.statements: list[tuple[str, tuple[object, ...]]] = []
-        self.session_settings: list[tuple[str, tuple[object, ...]]] = []
-
-    async def execute_raw(self, query: str, *args: object) -> int:
-        if query == ROLLUP_LOCK_TIMEOUT_SQL:
-            self.session_settings.append((query, args))
-            return 0
-        self.statements.append((query, args))
-        return len(args)
-
-    @asynccontextmanager
-    async def _tx(self) -> AsyncIterator["_RecordingDb"]:
-        yield self
-
-    def tx(self, timeout: object = None) -> AbstractAsyncContextManager["_RecordingDb"]:
-        return self._tx()
-
-
-class _RecordingPrismaClient:
-    def __init__(self) -> None:
-        self.db = _RecordingDb()
-
-
-@pytest.mark.asyncio
-async def test_writer_issues_one_statement_per_batch_not_one_per_key():
-    """The whole point of LIT-5291: 250 aggregated keys must not become 250 statements."""
-    prisma_client = _RecordingPrismaClient()
-    transactions = {f"k{i}": tag_txn(tag=f"team-{i}") for i in range(250)}
-
-    await DBSpendUpdateWriter.update_daily_tag_spend(
-        n_retry_times=0,
-        prisma_client=prisma_client,
-        proxy_logging_obj=None,
-        daily_spend_transactions=transactions,
-    )
-
-    # 250 keys at a batch size of 100 is three statements, one per batch.
-    assert len(prisma_client.db.statements) == 3
-    assert [statement.count("ON CONFLICT") for statement, _ in prisma_client.db.statements] == [1, 1, 1]
-    assert transactions == {}
-
-
-@pytest.mark.asyncio
-async def test_writer_survives_a_transaction_whose_key_columns_are_null():
-    """A NULL key column used to raise out of prisma and drop the whole batch's spend."""
-    prisma_client = _RecordingPrismaClient()
-    transactions = {
-        "mcp": tag_txn(model=None, custom_llm_provider=None, mcp_namespaced_tool_name="server/tool"),
-        "chat": tag_txn(),
-    }
-
-    await DBSpendUpdateWriter.update_daily_tag_spend(
-        n_retry_times=0,
-        prisma_client=prisma_client,
-        proxy_logging_obj=None,
-        daily_spend_transactions=transactions,
-    )
-
-    assert len(prisma_client.db.statements) == 1
-    _, params = prisma_client.db.statements[0]
-    assert None not in params[:9]
-    assert transactions == {}

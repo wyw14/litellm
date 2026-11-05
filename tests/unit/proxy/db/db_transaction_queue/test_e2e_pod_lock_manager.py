@@ -1,90 +1,20 @@
 import os
-import traceback
-from litellm._uuid import uuid
-from typing import List
-from datetime import datetime, timezone, timedelta
 
 from dotenv import load_dotenv
-from fastapi import Request
-from fastapi.routing import APIRoute
-import httpx
-import json
-from unittest.mock import MagicMock, patch
+
+from litellm._uuid import uuid
 
 load_dotenv()
-import io
-import time
-import fakeredis
-
 # this file is to test litellm/proxy
-
 import asyncio
+import time
 
 import pytest
-from litellm.proxy.db.db_transaction_queue.pod_lock_manager import PodLockManager
+
 import litellm
-from litellm.proxy.management_endpoints.internal_user_endpoints import (
-    new_user,
-    user_info,
-    user_update,
-)
-from litellm.proxy.auth.auth_checks import get_key_object
-from litellm.proxy.management_endpoints.key_management_endpoints import (
-    delete_key_fn,
-    generate_key_fn,
-    generate_key_helper_fn,
-    info_key_fn,
-    list_keys,
-    regenerate_key_fn,
-    update_key_fn,
-)
-from litellm.proxy.management_endpoints.team_endpoints import (
-    new_team,
-    team_info,
-    update_team,
-)
-from litellm.proxy.proxy_server import (
-    LitellmUserRoles,
-    audio_transcriptions,
-    chat_completion,
-    completion,
-    embeddings,
-    model_list,
-    moderations,
-    user_api_key_auth,
-)
-from litellm.proxy.management_endpoints.customer_endpoints import (
-    new_end_user,
-)
-from litellm.proxy.spend_tracking.spend_management_endpoints import (
-    global_spend,
-    spend_key_fn,
-    spend_user_fn,
-    view_spend_logs,
-)
-from litellm.proxy.utils import PrismaClient, ProxyLogging, hash_token, update_spend
-
-
-from starlette.datastructures import URL
-
 from litellm.caching.caching import DualCache, RedisCache
-from litellm.types.proxy.management_endpoints.ui_sso import (
-    LiteLLM_UpperboundKeyGenerateParams,
-)
-from litellm.proxy._types import (
-    DynamoDBArgs,
-    GenerateKeyRequest,
-    KeyRequest,
-    NewCustomerRequest,
-    NewTeamRequest,
-    NewUserRequest,
-    ProxyErrorTypes,
-    ProxyException,
-    UpdateKeyRequest,
-    UpdateTeamRequest,
-    UpdateUserRequest,
-    UserAPIKeyAuth,
-)
+from litellm.proxy.db.db_transaction_queue.pod_lock_manager import PodLockManager
+from litellm.proxy.utils import PrismaClient, ProxyLogging
 from tests._master_key import MASTER_KEY
 
 proxy_logging_obj = ProxyLogging(user_api_key_cache=DualCache())
@@ -369,82 +299,3 @@ async def test_release_expired_lock():
     lock_record = await global_redis_cache.async_get_cache(lock_key)
     assert lock_record == second_lock_manager.pod_id
 
-
-@pytest.mark.skip(reason="Requires Redis connection.")
-@pytest.mark.asyncio
-async def test_e2e_size_of_redis_buffer():
-    """
-    Ensure that all elements from the redis queue's get flushed to the DB
-
-    Goal of this is to ensure Redis does not blow up in size
-    """
-    from litellm.proxy.db.db_spend_update_writer import DBSpendUpdateWriter
-    from litellm.proxy.db.db_transaction_queue.base_update_queue import BaseUpdateQueue
-    from litellm.caching import RedisCache
-    from litellm._uuid import uuid
-
-    redis_cache = RedisCache(
-        host=os.getenv("REDIS_HOST"),
-        port=os.getenv("REDIS_PORT"),
-        password=os.getenv("REDIS_PASSWORD"),
-    )
-    fake_redis_client = fakeredis.FakeAsyncRedis()
-    redis_cache.redis_async_client = fake_redis_client
-
-    setattr(litellm.proxy.proxy_server, "use_redis_transaction_buffer", True)
-    db_writer = DBSpendUpdateWriter(redis_cache=redis_cache)
-
-    # get all the queues
-    initialized_queues: List[BaseUpdateQueue] = []
-    for attr in dir(db_writer):
-        if isinstance(getattr(db_writer, attr), BaseUpdateQueue):
-            initialized_queues.append(getattr(db_writer, attr))
-
-    # add mock data to each queue
-    new_keys_added = []
-    for queue in initialized_queues:
-        key = f"test_key_{queue.__class__.__name__}_{uuid.uuid4()}"
-        new_keys_added.append(key)
-        await queue.add_update(
-            {
-                key: {
-                    "spend": 1.0,
-                    "entity_id": "test_entity_id",
-                    "entity_type": "user",
-                    "api_key": "test_api_key",
-                    "model": "test_model",
-                    "custom_llm_provider": "test_custom_llm_provider",
-                    "date": "2025-01-01",
-                    "prompt_tokens": 100,
-                    "completion_tokens": 100,
-                    "total_tokens": 200,
-                    "response_cost": 1.0,
-                    "api_requests": 1,
-                    "successful_requests": 1,
-                    "failed_requests": 0,
-                }
-            }
-        )
-
-    print("initialized_queues=", initialized_queues)
-    print("new_keys_added=", new_keys_added)
-
-    # get the size of each queue
-    for queue in initialized_queues:
-        assert (
-            queue.update_queue.qsize() == 1
-        ), f"Queue {queue.__class__.__name__} was not initialized with mock data. Expected size 1, got {queue.update_queue.qsize()}"
-
-    # flush from in-memory -> redis -> to DB
-    with patch(
-        "litellm.proxy.db.db_spend_update_writer.PodLockManager.acquire_lock",
-        return_value=True,
-    ):
-        await db_writer._commit_spend_updates_to_db_with_redis(
-            prisma_client=MagicMock(), n_retry_times=3, proxy_logging_obj=MagicMock()
-        )
-
-    # Verify all the keys were looked up in Redis
-    keys = await fake_redis_client.keys("*")
-    print("found keys even after flushing to DB", keys)
-    assert len(keys) == 0, f"Expected Redis to be empty, but found keys: {keys}"

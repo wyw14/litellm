@@ -40,7 +40,7 @@ proxy + SpendLogs rows. Status: `covered` / `partial` / `gap`.
 | Entity | Existing | Status | Live e2e |
 |--------|----------|--------|----------|
 | API key | `test_db_spend_update_writer.py`, `test_spend_counters.py` | covered | yes (`test_key_spend_equals_sum_of_logs`) |
-| Tag | `test_update_daily_tag_spend.py` | partial | yes (`test_tag_spend_matches_sum_of_tagged_logs`) |
+| Tag | `tests/unit/accounting/test_projection.py` | partial | yes (`test_tag_spend_matches_sum_of_tagged_logs`) |
 | End-user | `test_proxy_update_spend.py` | covered | yes |
 | Spend == sum(logs) consistency | none | gap | yes (key + tag aggregate == sum of rows) |
 | Concurrent increments (one key, parallel writers) | `tests/integration/spend/test_spend_rollup_accuracy.py`, `tests/integration/spend/test_chaos_burst_spend_once.py` (burst) | partial | yes (`test_burst_of_concurrent_calls_loses_no_spend`) |

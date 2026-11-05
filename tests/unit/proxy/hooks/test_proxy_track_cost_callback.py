@@ -14,13 +14,14 @@ from fastapi import HTTPException
 
 import litellm
 from litellm._logging import verbose_proxy_logger
+from litellm.accounting.projection import project
+from litellm.accounting.snapshot import build_accounting_payload
 from litellm.caching.dual_cache import DualCache
 from litellm.litellm_core_utils.internal_call_metadata import MODEL_ACCESS_GROUP_METADATA_KEY
 from litellm.proxy._types import ProxyException, SpendLogsPayload, UserAPIKeyAuth
 from litellm.proxy.collector import SpendEventConsumer
 from litellm.proxy.db.db_lookup_gate import DBLookupDeadlineExceeded
 from litellm.proxy.db.db_spend_update_writer import DBSpendUpdateWriter
-from litellm.proxy.db.model_usage_rollup import build_model_usage_transaction
 from litellm.proxy.db.spend_log_tool_index import response_tool_call_names
 from litellm.proxy.hooks.proxy_track_cost_callback import (
     ProxyDBLogger,
@@ -269,24 +270,34 @@ async def test_attempt_rows_add_spend_but_not_requests_to_daily_spend():
     """Regression since #47416: one caller request with N billed earlier attempts counted N+1 requests in
     the daily spend tables. The attempt rows keep their spend, tokens and model usage and count zero requests."""
     payloads = await _spend_log_payloads_of_a_retried_timeout_across_a_fallback()
-    prisma = MagicMock()
-    prisma.get_request_status = MagicMock(return_value="failure")
-
-    daily = [
-        await DBSpendUpdateWriter()._common_add_spend_log_transaction_to_daily_transaction(
-            payload=payload, prisma_client=prisma, type="user"
+    projected = [
+        project(
+            json.loads(
+                json.dumps(
+                    build_accounting_payload(
+                        payload,
+                        entities={"api_key": "hashed-key", "user": "user-1"},
+                        model_access_groups=(),
+                        windows=(),
+                        router=lambda: None,
+                    ),
+                    default=str,
+                )
+            )
         )
         for payload in payloads
     ]
 
-    assert all(row is not None for row in daily)
-    assert [row["api_requests"] for row in daily if row is not None] == [1, 0, 0]
-    assert [row["failed_requests"] for row in daily if row is not None] == [1, 0, 0]
-    assert [row["spend"] for row in daily if row is not None] == [7.2e-05, 7.2e-05, 4.8e-05]
-    assert [row["prompt_tokens"] for row in daily if row is not None] == [24, 24, 24]
-    model_usage = [build_model_usage_transaction(payload) for payload in payloads]
-    assert all(usage is not None for usage in model_usage), "attempt spend must still reach daily model usage"
-    assert [usage.spend for usage in model_usage if usage is not None] == [7.2e-05, 7.2e-05, 4.8e-05]
+    daily = [next(dict(item.increments) for item in rows if item.table == "LiteLLM_DailyUserSpend") for rows in projected]
+    assert [row["api_requests"] for row in daily] == [1, 0, 0]
+    assert [row["failed_requests"] for row in daily] == [1, 0, 0]
+    assert [row["spend"] for row in daily] == [7.2e-05, 7.2e-05, 4.8e-05]
+    assert [row["prompt_tokens"] for row in daily] == [24, 24, 24]
+    model_usage = [
+        next(dict(item.increments)["spend"] for item in rows if item.table == "LiteLLM_DailyModelUsage")
+        for rows in projected
+    ]
+    assert model_usage == [7.2e-05, 7.2e-05, 4.8e-05], "attempt spend must still reach daily model usage"
 
 
 @pytest.mark.asyncio
@@ -1207,7 +1218,6 @@ async def test_update_database_and_spend_counters_updates_counters_after_db_upda
         budget_reservation=budget_reservation,
         end_user_id="test_end_user_id",
         tags=["tag-a"],
-        request_started_at=start_time,
         model_access_groups=("premium",),
         project_id=None,
     )
@@ -2847,11 +2857,11 @@ async def test_a_slow_spend_counter_store_lets_the_failure_out_and_raises_the_co
 
 
 @pytest.mark.asyncio
-async def test_a_failure_spend_row_lands_in_the_key_budget_window_as_of_the_request_start(
+async def test_a_failure_spend_row_leaves_the_key_budget_window_row_to_the_accounting_ledger(
     live_spend_counters: DualCache, monkeypatch: pytest.MonkeyPatch
 ):
-    """The window row's one-time seed from the spend log stops at the request start, which keeps the failure row
-    it already logged from being counted twice."""
+    """The ledger writes key and team window rows from the request's delivery, so queueing them here too would count
+    the failure row twice."""
     from litellm.proxy.proxy_server import proxy_logging_obj
 
     window_queue: Final = proxy_logging_obj.db_spend_update_writer.window_spend_update_queue
@@ -2877,10 +2887,7 @@ async def test_a_failure_spend_row_lands_in_the_key_budget_window_as_of_the_requ
         },
     )
 
-    assert [
-        (row["entity_type"], row["entity_id"], row["spend"], row["started_at"])
-        for row in await window_queue.flush_and_get_aggregated_window_spend_transactions()
-    ] == [("key", "hashed-key", pytest.approx(0.125), "2026-10-20T12:00:00.000000")]
+    assert await window_queue.flush_and_get_aggregated_window_spend_transactions() == ()
 
 
 @pytest.mark.asyncio

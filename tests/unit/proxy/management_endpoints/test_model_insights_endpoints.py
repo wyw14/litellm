@@ -1,13 +1,13 @@
-from datetime import datetime, timezone
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
+from litellm.accounting.projection import project
 from litellm.proxy._types import LitellmUserRoles, UserAPIKeyAuth
 from litellm.proxy.auth.user_api_key_auth import user_api_key_auth
-from litellm.proxy.db.model_usage_rollup import build_model_usage_transaction, flush_model_usage_transactions
+from litellm.proxy.db.model_usage_rollup import queue_model_usage_upsert
 from litellm.proxy.management_endpoints.model_insights_endpoints import router
 
 
@@ -246,20 +246,20 @@ async def test_model_insights_reads_back_what_the_rollup_wrote() -> None:
         "spend": 0.5,
         "prompt_tokens": 10,
         "completion_tokens": 20,
-        "startTime": datetime(2026, 9, 28, tzinfo=timezone.utc),
+        "startTime": "2026-09-28T00:00:00+00:00",
         "model": "gpt-5",
         "model_group": "gpt-5",
-        "metadata": "{}",
-        "request_tags": '["task:debugging"]',
+        "metadata": {},
+        "request_tags": ["task:debugging"],
         "custom_llm_provider": "openai",
         "status": "success",
     }
 
-    transactions = (
-        build_model_usage_transaction(payload),
-        build_model_usage_transaction({**payload, "request_tags": "[]"}),
-    )
-    await flush_model_usage_transactions(prisma, [t for t in transactions if t is not None])
+    async with prisma.db.batch_() as batcher:
+        for row in (payload, {**payload, "request_tags": []}):
+            for item in project(row):
+                if item.table == "LiteLLM_DailyModelUsage":
+                    queue_model_usage_upsert(batcher, dict(item.key), dict(item.increments))
 
     body = _call(table, "metric=requests").json()
 
