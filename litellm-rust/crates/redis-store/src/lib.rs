@@ -1,11 +1,14 @@
-#![expect(dead_code, reason = "the store families built on these tiers and codecs land in the next PR")]
-
+pub mod auth_cache;
 mod codec;
 mod error;
 mod memory;
 mod number;
+pub mod rate_limits;
 mod remote;
 mod request;
+pub mod router_cooldowns;
+pub mod router_usage;
+pub mod spend_counters;
 mod tier;
 mod value;
 

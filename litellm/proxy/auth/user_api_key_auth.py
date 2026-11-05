@@ -27,7 +27,6 @@ import litellm
 from litellm._internal_context import service_target
 from litellm._logging import verbose_logger, verbose_proxy_logger
 from litellm._service_logger import ServiceLogging
-from litellm.caching.redis_cache import RedisCache
 from litellm.constants import (
     CLIENT_REQUESTED_MODEL_SCOPE_KEY,
     GLOBAL_PROXY_SPEND_CACHE_KEY,
@@ -182,10 +181,20 @@ from litellm.proxy.utils import (
     ProxyLogging,
     normalize_route_for_root_path,
 )
+from litellm.redis.stores.spend_counters import (
+    SpendCounterStore,
+    team_member_counter,
+)
 from litellm.repositories.table_repositories import JWTKeyMappingRepository, TeamMembershipRepository
 from litellm.repositories.user_repository import UserRepository
 from litellm.repositories.verification_token_repository import VerificationTokenRepository
-from litellm.router_api import fallbacks_disabled, references_provider_scoped_resource, request_fallback_chain
+from litellm.router_api import (
+    RoutingContext,
+    fallbacks_disabled,
+    references_provider_scoped_resource,
+    request_fallback_chain,
+)
+from litellm.router_utils.routing_read_batch import RoutingPrefetch
 from litellm.secret_managers.main import get_secret_bool
 from litellm.types.services import ServiceTypes
 
@@ -2648,6 +2657,7 @@ async def user_api_key_auth_builder(
             await prefetch_identity_keys(
                 _identity_cache_keys(api_key, end_user_id=end_user_id, key_is_resolved=valid_token is not None),
                 user_api_key_cache=user_api_key_cache,
+                before_read=arm_routing_cooldowns,
             )
         if end_user_id:
             try:
@@ -3097,7 +3107,7 @@ async def validate_resolved_virtual_key(  # noqa: C901  # Preserve ordering of e
                         team_member_spend = valid_token.team_member_spend
                         if valid_token.user_id is not None and valid_token.team_id is not None:
                             team_member_spend = await get_current_spend(
-                                counter_key=f"spend:team_member:{valid_token.user_id}:{valid_token.team_id}",
+                                counter_key=team_member_counter(valid_token.user_id, valid_token.team_id),
                                 fallback_spend=team_member_spend,
                                 max_budget=team_member_budget,
                             )
@@ -4266,10 +4276,10 @@ async def _authorize_authenticated_request(
     return None
 
 
-def _spend_counter_redis_cache() -> RedisCache | None:
-    from litellm.proxy.proxy_server import spend_counter_cache
+def _spend_counter_store() -> SpendCounterStore:
+    from litellm.proxy.proxy_server import spend_counter_store
 
-    return spend_counter_cache.redis_cache
+    return spend_counter_store
 
 
 def _identity_cache_keys(api_key: str, *, end_user_id: str | None, key_is_resolved: bool) -> tuple[str, ...]:
@@ -4300,7 +4310,18 @@ async def _prefetch_referenced_auth_objects(
         refs=AuthObjectRefs.from_token(valid_token),
         user_api_key_cache=user_api_key_cache,
         prisma_client=prisma_client,
+        before_read=arm_routing_cooldowns,
     )
+
+
+def arm_routing_cooldowns() -> None:
+    """Declares the cooldown read routing takes later into the auth prefetch's native round trip, so a request whose
+    auth objects come from Redis pays one round trip for both. Armed only when a prefetch reads Redis, so a request
+    served from memory, or denied, reads no cooldowns early."""
+    from litellm.proxy.proxy_server import llm_router  # noqa: PLC0415  # runtime global
+
+    if llm_router is not None:
+        RoutingPrefetch.arm_cooldowns(RoutingContext(llm_router))
 
 
 def _seed_request_destinations(user_api_key_dict: UserAPIKeyAuth, request: Request | None = None) -> None:
@@ -4372,7 +4393,7 @@ async def user_api_key_auth(
     with (
         phase_span(f"auth {route}"),
         service_target(AUTH_OBJECTS_TARGET),
-        spend_counter_batch_scope(_spend_counter_redis_cache()),
+        spend_counter_batch_scope(_spend_counter_store()),
     ):
         try:
             user_api_key_auth_obj: Final = await user_api_key_auth_builder(
