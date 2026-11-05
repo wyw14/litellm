@@ -172,11 +172,7 @@ fn shared_client(
     }
     let connected = {
         let _runtime = runtime.enter();
-        litellm_redis_connect::connect(
-            resolved.clone(),
-            host,
-            breaker.map(|breaker| breaker.0),
-        )
+        litellm_redis_connect::connect(resolved.clone(), host, breaker.map(|breaker| breaker.0))
     };
     let client = match connected {
         Ok(client) => client,

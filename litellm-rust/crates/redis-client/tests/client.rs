@@ -10,12 +10,12 @@ use rstest::rstest;
 
 use litellm_circuit_breaker::{Breaker, Config, State};
 
+use litellm_redis_client::commands;
 use litellm_redis_client::{
     Amount, CallEvent, Credentials, DEFAULT_TIMEOUT, Error, Expiry, FailureKind, Namespace,
     Operation, Outcome, RedisClient, RedisConfig, RedisEvents, RedisUrl, Script, Standalone,
     Target, Timeouts, Ttl, Value,
 };
-use litellm_redis_client::commands;
 use litellm_secret_value::SecretValue;
 use support::{KEEP, connect, connect_guarded, connections, endpoint};
 
@@ -43,7 +43,11 @@ async fn write(client: &RedisClient, counter: Counter, key: &str, expiry: Expiry
         (Counter::IncrBy, Expiry::Refresh(_)) => unreachable!("increment_cache never refreshes"),
         (Counter::IncrByFloat, expiry) => {
             client
-                .send(commands::incr_by_float(key, Amount::Float(0.5), Some(expiry)))
+                .send(commands::incr_by_float(
+                    key,
+                    Amount::Float(0.5),
+                    Some(expiry),
+                ))
                 .await
                 .unwrap();
         }
@@ -53,7 +57,11 @@ async fn write(client: &RedisClient, counter: Counter, key: &str, expiry: Expiry
 async fn persist_as(client: &RedisClient, key: &str) {
     let source = "return redis.call('SET', KEYS[1], '1')";
     client
-        .send(commands::eval::<redis::Value>(&Script::new(source), &[key], Vec::<String>::new()))
+        .send(commands::eval::<redis::Value>(
+            &Script::new(source),
+            &[key],
+            Vec::<String>::new(),
+        ))
         .await
         .unwrap();
 }
@@ -125,9 +133,16 @@ async fn keep_existing_leaves_a_running_ttl_and_refresh_resets_it(
     )
     .await;
 
-    assert!(remaining(client.send(commands::ttl("kept")).await.unwrap()) <= Duration::from_secs(30));
-    assert!(remaining(client.send(commands::ttl("kept_int")).await.unwrap()) <= Duration::from_secs(30));
-    assert!(remaining(client.send(commands::ttl("refreshed")).await.unwrap()) > Duration::from_secs(500));
+    assert!(
+        remaining(client.send(commands::ttl("kept")).await.unwrap()) <= Duration::from_secs(30)
+    );
+    assert!(
+        remaining(client.send(commands::ttl("kept_int")).await.unwrap()) <= Duration::from_secs(30)
+    );
+    assert!(
+        remaining(client.send(commands::ttl("refreshed")).await.unwrap())
+            > Duration::from_secs(500)
+    );
 }
 
 #[rstest]
@@ -158,20 +173,31 @@ async fn counters_send_the_commands_redis_cache_sends(
         .await
         .unwrap();
 
-    client.send(commands::incr_by("int", 1, MINUTE)).await.unwrap();
+    client
+        .send(commands::incr_by("int", 1, MINUTE))
+        .await
+        .unwrap();
     client
         .send(commands::incr_by_float("kept", Amount::Int(1), Some(KEEP)))
         .await
         .unwrap();
     client
-        .send(commands::incr_by_float("refreshed", Amount::Float(0.5), Some(Expiry::Refresh(MINUTE))))
+        .send(commands::incr_by_float(
+            "refreshed",
+            Amount::Float(0.5),
+            Some(Expiry::Refresh(MINUTE)),
+        ))
         .await
         .unwrap();
     client
         .run(
             &client
                 .pipeline()
-                .add(commands::incr_by_float("piped", Amount::Float(0.25), Some(Expiry::Refresh(MINUTE))))
+                .add(commands::incr_by_float(
+                    "piped",
+                    Amount::Float(0.25),
+                    Some(Expiry::Refresh(MINUTE)),
+                ))
                 .add(commands::incr_by_float("bare", Amount::Float(0.25), None)),
         )
         .await;
@@ -209,9 +235,15 @@ async fn integer_increments_preserve_every_bit(
         .await
         .unwrap();
     let expected = initial + delta;
-    let result = client.send(commands::incr_by("integer", delta, MINUTE)).await.unwrap();
+    let result = client
+        .send(commands::incr_by("integer", delta, MINUTE))
+        .await
+        .unwrap();
     assert_eq!(result, expected);
-    assert_eq!(client.send(commands::get::<i64>("integer")).await.unwrap(), Some(expected));
+    assert_eq!(
+        client.send(commands::get::<i64>("integer")).await.unwrap(),
+        Some(expected)
+    );
 }
 
 #[rstest]
@@ -246,7 +278,10 @@ async fn outage_events_report_the_failure_kind(
             .remove(0)
             .map(drop)
     } else {
-        client.send(commands::get::<String>("missing")).await.map(drop)
+        client
+            .send(commands::get::<String>("missing"))
+            .await
+            .map(drop)
     };
     if timeout {
         server.thaw().await.unwrap();
@@ -295,9 +330,18 @@ async fn every_call_reports_its_operation_and_outcome(
         .await
         .unwrap();
 
-    let _ = client.send(commands::incr_by("list", 1, Duration::from_secs(60))).await;
+    let _ = client
+        .send(commands::incr_by("list", 1, Duration::from_secs(60)))
+        .await;
     let _ = client.send(commands::get::<String>("missing")).await;
-    let _ = client.run(&client.pipeline().add(commands::get::<Value>("a")).add(commands::get::<Value>("b"))).await;
+    let _ = client
+        .run(
+            &client
+                .pipeline()
+                .add(commands::get::<Value>("a"))
+                .add(commands::get::<Value>("b")),
+        )
+        .await;
     let failures = client
         .run(&client.pipeline().add(commands::incr_by_float(
             "list",
@@ -342,12 +386,29 @@ async fn namespaces_isolate_keys_on_the_server(
     let b = connect(&server, "b", DEFAULT_TIMEOUT);
     let bare = connect(&server, "", DEFAULT_TIMEOUT);
 
-    a.send(commands::set("x", "1", Duration::from_secs(60))).await.unwrap();
+    a.send(commands::set("x", "1", Duration::from_secs(60)))
+        .await
+        .unwrap();
 
-    assert_eq!(a.send(commands::get::<String>("x")).await.unwrap().as_deref(), Some("1"));
-    assert_eq!(a.send(commands::get::<String>("a:x")).await.unwrap().as_deref(), Some("1"));
     assert_eq!(
-        bare.send(commands::get::<String>("a:x")).await.unwrap().as_deref(),
+        a.send(commands::get::<String>("x"))
+            .await
+            .unwrap()
+            .as_deref(),
+        Some("1")
+    );
+    assert_eq!(
+        a.send(commands::get::<String>("a:x"))
+            .await
+            .unwrap()
+            .as_deref(),
+        Some("1")
+    );
+    assert_eq!(
+        bare.send(commands::get::<String>("a:x"))
+            .await
+            .unwrap()
+            .as_deref(),
         Some("1")
     );
     assert_eq!(b.send(commands::get::<String>("x")).await.unwrap(), None);
@@ -366,11 +427,17 @@ async fn a_rejected_command_keeps_the_connection(
         .unwrap();
     let before = connections(&server).await;
 
-    let rejected = client.send(commands::incr_by("list", 1, Duration::from_secs(60))).await;
+    let rejected = client
+        .send(commands::incr_by("list", 1, Duration::from_secs(60)))
+        .await;
 
     assert!(matches!(rejected, Err(Error::Server(_))), "{rejected:?}");
     assert_eq!(
-        client.send(commands::get::<String>("list")).await.unwrap().as_deref(),
+        client
+            .send(commands::get::<String>("list"))
+            .await
+            .unwrap()
+            .as_deref(),
         Some("item")
     );
     assert_eq!(connections(&server).await, before);
@@ -391,7 +458,10 @@ async fn a_reply_of_another_type_is_a_decode_error_and_a_missing_key_is_none(
     let decoded = client.send(commands::get::<i64>("float")).await;
 
     assert!(matches!(decoded, Err(Error::Decode(_))), "{decoded:?}");
-    assert_eq!(client.send(commands::get::<i64>("missing")).await.unwrap(), None);
+    assert_eq!(
+        client.send(commands::get::<i64>("missing")).await.unwrap(),
+        None
+    );
 }
 
 #[rstest]
@@ -419,7 +489,11 @@ async fn a_timed_out_command_does_not_leak_its_reply_into_the_next_one(
         "{timed_out:?}"
     );
     assert_eq!(
-        client.send(commands::get::<String>("second")).await.unwrap().as_deref(),
+        client
+            .send(commands::get::<String>("second"))
+            .await
+            .unwrap()
+            .as_deref(),
         Some("2")
     );
 }
@@ -436,7 +510,11 @@ async fn the_same_client_recovers_after_redis_restarts(
 
     let recovered = eventually(async || {
         client
-            .send(commands::incr_by("after_restart", 1, Duration::from_secs(60)))
+            .send(commands::incr_by(
+                "after_restart",
+                1,
+                Duration::from_secs(60),
+            ))
             .await
             .ok()
     })
@@ -490,10 +568,19 @@ async fn mget_and_del_span_slots_in_input_order(
 ) {
     let server = RedisDeployment::start(topology).await.unwrap();
     let client = connect(&server, "", DEFAULT_TIMEOUT);
-    client.send(commands::set("a", "1", Duration::from_secs(60))).await.unwrap();
-    client.send(commands::set("c", "3", Duration::from_secs(60))).await.unwrap();
+    client
+        .send(commands::set("a", "1", Duration::from_secs(60)))
+        .await
+        .unwrap();
+    client
+        .send(commands::set("c", "3", Duration::from_secs(60)))
+        .await
+        .unwrap();
 
-    let values = client.send(commands::mget::<String>(&["c", "b", "a"])).await.unwrap();
+    let values = client
+        .send(commands::mget::<String>(&["c", "b", "a"]))
+        .await
+        .unwrap();
     let deleted = client.send(commands::del(&["a", "b", "c"])).await.unwrap();
 
     assert_eq!(
@@ -502,7 +589,10 @@ async fn mget_and_del_span_slots_in_input_order(
     );
     assert_eq!(deleted, 2);
     assert_eq!(
-        client.send(commands::mget::<String>(&["a", "c"])).await.unwrap(),
+        client
+            .send(commands::mget::<String>(&["a", "c"]))
+            .await
+            .unwrap(),
         vec![None, None]
     );
 }
@@ -527,7 +617,11 @@ async fn set_nx_only_writes_a_missing_key(
     assert!(first);
     assert!(!second);
     assert_eq!(
-        client.send(commands::get::<String>("lock")).await.unwrap().as_deref(),
+        client
+            .send(commands::get::<String>("lock"))
+            .await
+            .unwrap()
+            .as_deref(),
         Some("owner-1")
     );
 }
@@ -545,7 +639,11 @@ async fn ttl_reports_missing_persistent_and_remaining_time(
         .await
         .unwrap();
     client
-        .send(commands::incr_by_float("expired_later", Amount::Float(0.5), Some(KEEP)))
+        .send(commands::incr_by_float(
+            "expired_later",
+            Amount::Float(0.5),
+            Some(KEEP),
+        ))
         .await
         .unwrap();
     assert!(
@@ -555,8 +653,14 @@ async fn ttl_reports_missing_persistent_and_remaining_time(
             .unwrap()
     );
 
-    assert_eq!(client.send(commands::ttl("missing")).await.unwrap(), Ttl::Missing);
-    assert_eq!(client.send(commands::ttl("persistent")).await.unwrap(), Ttl::Persistent);
+    assert_eq!(
+        client.send(commands::ttl("missing")).await.unwrap(),
+        Ttl::Missing
+    );
+    assert_eq!(
+        client.send(commands::ttl("persistent")).await.unwrap(),
+        Ttl::Persistent
+    );
     assert!(matches!(
         client.send(commands::ttl("expiring")).await.unwrap(),
         Ttl::Expires(left) if left > Duration::from_secs(50) && left <= Duration::from_secs(60)
@@ -582,13 +686,21 @@ async fn incr_by_float_accumulates_fractions(
     let client = connect(&server, "", DEFAULT_TIMEOUT);
 
     client
-        .send(commands::incr_by_float("spend", Amount::Float(0.25), Some(KEEP)))
+        .send(commands::incr_by_float(
+            "spend",
+            Amount::Float(0.25),
+            Some(KEEP),
+        ))
         .await
         .unwrap();
 
     assert_eq!(
         client
-            .send(commands::incr_by_float("spend", Amount::Float(0.5), Some(KEEP)))
+            .send(commands::incr_by_float(
+                "spend",
+                Amount::Float(0.5),
+                Some(KEEP)
+            ))
             .await
             .unwrap(),
         0.75
@@ -620,7 +732,10 @@ async fn concurrent_commands_on_one_cloned_client_all_apply(
         task.await.unwrap();
     }
 
-    assert_eq!(client.send(commands::get::<i64>("shared")).await.unwrap(), Some(1000));
+    assert_eq!(
+        client.send(commands::get::<i64>("shared")).await.unwrap(),
+        Some(1000)
+    );
 }
 
 fn breaker(failure_threshold: u32) -> Breaker {
@@ -684,9 +799,15 @@ async fn rejected_commands_never_open_the_breaker(
         .unwrap();
 
     let rejected = [
-        client.send(commands::incr_by("list", 1, Duration::from_secs(60))).await,
-        client.send(commands::incr_by("list", 1, Duration::from_secs(60))).await,
-        client.send(commands::incr_by("list", 1, Duration::from_secs(60))).await,
+        client
+            .send(commands::incr_by("list", 1, Duration::from_secs(60)))
+            .await,
+        client
+            .send(commands::incr_by("list", 1, Duration::from_secs(60)))
+            .await,
+        client
+            .send(commands::incr_by("list", 1, Duration::from_secs(60)))
+            .await,
     ];
 
     assert!(
@@ -710,8 +831,16 @@ async fn an_open_breaker_fails_every_pipeline_op_without_sending(
     let client = connect_guarded(&server, "", Duration::from_millis(300), Some(breaker(1)));
     let pipeline = client
         .pipeline()
-        .add(commands::incr_by_float("a", Amount::Int(1), Some(Expiry::Refresh(Duration::from_secs(60)))))
-        .add(commands::incr_by_float("c", Amount::Int(1), Some(Expiry::Refresh(Duration::from_secs(60)))));
+        .add(commands::incr_by_float(
+            "a",
+            Amount::Int(1),
+            Some(Expiry::Refresh(Duration::from_secs(60))),
+        ))
+        .add(commands::incr_by_float(
+            "c",
+            Amount::Int(1),
+            Some(Expiry::Refresh(Duration::from_secs(60))),
+        ));
 
     server.freeze().await.unwrap();
     let failed = client.run(&pipeline).await;
@@ -775,9 +904,16 @@ async fn a_host_endpoint_connects_to_its_database() {
         .await
         .unwrap();
 
-    assert_eq!(in_db_0.send(commands::get::<String>("k")).await.unwrap(), None);
     assert_eq!(
-        via_url.send(commands::get::<String>("k")).await.unwrap().as_deref(),
+        in_db_0.send(commands::get::<String>("k")).await.unwrap(),
+        None
+    );
+    assert_eq!(
+        via_url
+            .send(commands::get::<String>("k"))
+            .await
+            .unwrap()
+            .as_deref(),
         Some("3")
     );
 }
@@ -827,13 +963,22 @@ async fn an_idle_client_pings_every_node_before_the_next_command_like_redis_py()
         unreachable!("started a cluster")
     };
     let client = health_checked(&server, Duration::from_secs(3), DEFAULT_TIMEOUT, None, None);
-    client.send(commands::set("k", "1", Duration::from_secs(60))).await.unwrap();
+    client
+        .send(commands::set("k", "1", Duration::from_secs(60)))
+        .await
+        .unwrap();
     let before = ping_calls(cluster).await;
 
-    client.send(commands::set("k", "2", Duration::from_secs(60))).await.unwrap();
+    client
+        .send(commands::set("k", "2", Duration::from_secs(60)))
+        .await
+        .unwrap();
     let busy = ping_calls(cluster).await;
     tokio::time::sleep(Duration::from_millis(3500)).await;
-    client.send(commands::set("k", "3", Duration::from_secs(60))).await.unwrap();
+    client
+        .send(commands::set("k", "3", Duration::from_secs(60)))
+        .await
+        .unwrap();
     let idle = ping_calls(cluster).await;
 
     assert_eq!(busy, before);
@@ -857,7 +1002,10 @@ async fn a_failed_health_check_is_neither_a_call_nor_a_breaker_failure() {
         Some(breaker.clone()),
         Some(recorded.clone()),
     );
-    client.send(commands::set("k", "1", Duration::from_secs(60))).await.unwrap();
+    client
+        .send(commands::set("k", "1", Duration::from_secs(60)))
+        .await
+        .unwrap();
 
     server.freeze().await.unwrap();
     tokio::time::sleep(Duration::from_millis(300)).await;

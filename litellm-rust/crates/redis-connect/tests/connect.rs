@@ -139,7 +139,11 @@ async fn python_sentinel_kwargs_follow_the_master_through_a_failover() {
     assert_eq!(promoted, sentinel.replica_port());
     assert_eq!(sentinel.master_port().await.unwrap(), promoted);
     assert_eq!(
-        client.send(commands::get::<String>("after")).await.unwrap().as_deref(),
+        client
+            .send(commands::get::<String>("after"))
+            .await
+            .unwrap()
+            .as_deref(),
         Some("2")
     );
 }
@@ -147,8 +151,7 @@ async fn python_sentinel_kwargs_follow_the_master_through_a_failover() {
 #[rstest]
 fn a_python_credential_provider_without_a_host_source_fails_at_boot() {
     let error = connect(
-        resolved(
-            serde_json::json!({"host": "redis", "credential_provider": true})),
+        resolved(serde_json::json!({"host": "redis", "credential_provider": true})),
         services(),
         None,
     )
@@ -172,12 +175,11 @@ fn config_only_aws_identities_fail_before_connecting(#[case] setting: &'static s
         ..services()
     };
     let error = connect(
-        resolved(
-            serde_json::json!({
-                "host": "redis", "ssl": true, "aws_iam_auth": true,
-                "aws_iam_user_name": "user", "aws_iam_cache_name": "cache",
-                "aws_iam_region": "us-east-1",
-            })),
+        resolved(serde_json::json!({
+            "host": "redis", "ssl": true, "aws_iam_auth": true,
+            "aws_iam_user_name": "user", "aws_iam_cache_name": "cache",
+            "aws_iam_region": "us-east-1",
+        })),
         host,
         None,
     )

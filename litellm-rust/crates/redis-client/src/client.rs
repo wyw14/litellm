@@ -131,9 +131,7 @@ impl RedisClient {
                         }
                         Trips::Separate => (
                             increment.query_async(&mut connection).await?,
-                            commands::ttl_cmd(&key)
-                                .query_async(&mut connection)
-                                .await?,
+                            commands::ttl_cmd(&key).query_async(&mut connection).await?,
                         ),
                     };
                     if current == -1 {

@@ -106,7 +106,13 @@ async fn ping_over_tls(
     client_key: ClientKey,
 ) -> Result<(), litellm_redis_client::Error> {
     let server = tls_server(require_client_certificate).await;
-    let tls = tls_options(server.files(), ca, verify_certificate, check_hostname, client_key);
+    let tls = tls_options(
+        server.files(),
+        ca,
+        verify_certificate,
+        check_hostname,
+        client_key,
+    );
     tls_client(&server, host, tls).unwrap().ping().await
 }
 
@@ -193,10 +199,17 @@ async fn an_encrypted_key_that_cannot_be_decrypted_fails_before_connecting(
 
     let error = tls_client(&server, "127.0.0.1", tls).err().unwrap();
 
-    let litellm_redis_client::ConnectError::TlsKey { path, reason: cause } = &error else {
+    let litellm_redis_client::ConnectError::TlsKey {
+        path,
+        reason: cause,
+    } = &error
+    else {
         panic!("expected a TLS key error, got {error:?}");
     };
-    assert_eq!(*path, server.files().encrypted_client_key.display().to_string());
+    assert_eq!(
+        *path,
+        server.files().encrypted_client_key.display().to_string()
+    );
     assert!(cause.to_string().contains(reason), "{cause}");
 }
 

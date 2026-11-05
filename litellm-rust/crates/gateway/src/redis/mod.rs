@@ -400,11 +400,19 @@ mod tests {
             .unwrap();
 
         assert_eq!(
-            cache.send(commands::get::<String>("rate-limit")).await.unwrap().as_deref(),
+            cache
+                .send(commands::get::<String>("rate-limit"))
+                .await
+                .unwrap()
+                .as_deref(),
             Some("1")
         );
         assert_eq!(
-            cache.send(commands::get::<String>("spend")).await.unwrap().as_deref(),
+            cache
+                .send(commands::get::<String>("spend"))
+                .await
+                .unwrap()
+                .as_deref(),
             Some("2")
         );
         assert_eq!(
@@ -430,7 +438,13 @@ mod tests {
                 .unwrap()
                 .is_none()
         );
-        assert!(unnamespaced.send(commands::get::<String>("spend")).await.unwrap().is_none());
+        assert!(
+            unnamespaced
+                .send(commands::get::<String>("spend"))
+                .await
+                .unwrap()
+                .is_none()
+        );
     }
 
     #[rstest]

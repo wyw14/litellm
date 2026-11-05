@@ -1,4 +1,7 @@
-#![expect(dead_code, reason = "the store families built on these tiers and codecs land in the next PR")]
+#![expect(
+    dead_code,
+    reason = "the store families built on these tiers and codecs land in the next PR"
+)]
 
 mod codec;
 mod error;
