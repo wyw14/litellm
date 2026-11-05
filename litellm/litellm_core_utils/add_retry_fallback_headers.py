@@ -1,10 +1,12 @@
 import json
 import math
-from collections.abc import Awaitable, Mapping
+from collections import Counter
+from collections.abc import Awaitable, Mapping, Sequence
 from types import MappingProxyType
-from typing import Final, Protocol, TypedDict, cast
+from typing import Final, Literal, Protocol, TypedDict, cast
 
 from pydantic import BaseModel, TypeAdapter, ValidationError
+from typing_extensions import ReadOnly
 
 from litellm.litellm_core_utils.hidden_params import (
     HIDDEN_PARAMS_ATTR as _HIDDEN_PARAMS_ATTR,
@@ -34,7 +36,10 @@ class AsyncIteratorProtocol(Protocol):
 
 _EMPTY_OBJECT_MAPPING: Final[Mapping[str, object]] = MappingProxyType({})
 _ROUTING_HEADER_MAPPING: Final = TypeAdapter(Mapping[str, object])
+_FALLBACK_ERROR_LIST_ADAPTER: Final = TypeAdapter(list[object])
 _COMPLEXITY_ROUTER_HEADER_PREFIX: Final = "x-litellm-complexity-router-"
+_FALLBACK_ERRORS_HEADER_KEY: Final = "x-litellm-fallback-errors"
+_UNKNOWN_ERROR_FIELD: Final = "unknown"
 
 
 def _routing_header_mapping(value: object) -> Mapping[str, object]:
@@ -267,7 +272,7 @@ def _coerce_error_dicts(items: list[object]) -> list[dict[str, object]]:
 def get_fallback_errors_from_headers(
     additional_headers: dict[str, object],
 ) -> list[dict[str, object]]:
-    existing_errors: Final = additional_headers.get("x-litellm-fallback-errors")
+    existing_errors: Final = additional_headers.get(_FALLBACK_ERRORS_HEADER_KEY)
     if isinstance(existing_errors, list):
         return _coerce_error_dicts(cast("list[object]", existing_errors))
     if isinstance(existing_errors, str):
@@ -278,6 +283,77 @@ def get_fallback_errors_from_headers(
         if isinstance(parsed_errors, list):
             return _coerce_error_dicts(cast("list[object]", parsed_errors))
     return []
+
+
+class FallbackErrorCount(TypedDict):
+    type: ReadOnly[str]
+    code: ReadOnly[str]
+    count: ReadOnly[int]
+
+
+class AggregatedFallbackErrors(TypedDict):
+    status: ReadOnly[Literal["success", "parse_error"]]
+    errors: ReadOnly[Sequence[FallbackErrorCount]]
+
+
+def _read_fallback_error_entries(
+    additional_headers: Mapping[str, object],
+) -> tuple[object, ...] | None:
+    raw_errors: Final = additional_headers.get(_FALLBACK_ERRORS_HEADER_KEY)
+    if raw_errors is None:
+        return ()
+    if isinstance(raw_errors, list):
+        return tuple(_FALLBACK_ERROR_LIST_ADAPTER.validate_python(raw_errors))
+    if not isinstance(raw_errors, str):
+        return None
+    try:
+        parsed_errors: Final = _FALLBACK_ERROR_LIST_ADAPTER.validate_json(raw_errors)
+    except ValidationError:
+        return None
+    return tuple(parsed_errors)
+
+
+def _fallback_error_bucket_field(entry: object, field_name: Literal["type", "code"]) -> str:
+    error_mapping: Final = _routing_header_mapping(entry)
+    field_value: Final = error_mapping.get(field_name)
+    return field_value if isinstance(field_value, str) else _UNKNOWN_ERROR_FIELD
+
+
+def aggregate_fallback_errors_from_headers(
+    additional_headers: Mapping[str, object],
+) -> AggregatedFallbackErrors:
+    """
+    Sanitized tally of the fallback errors carried in ``additional_headers``.
+
+    The header stores either a list or a JSON-serialized list of error objects.
+    Only ``type`` and ``code`` are read; missing or non-string values, including
+    entries that are not dicts at all, fall into the ``unknown`` bucket. Rows
+    are sorted by (type, code). ``message``, ``param`` and every other field are
+    never returned, the input headers are never modified, and no model call is
+    made. A header whose JSON cannot be parsed, or whose parsed value is not a
+    list, comes back as ``parse_error`` instead of being silently treated as no
+    errors.
+    """
+    entries: Final = _read_fallback_error_entries(additional_headers)
+    if entries is None:
+        return AggregatedFallbackErrors(status="parse_error", errors=[])
+
+    counts: Final = Counter(
+        (
+            _fallback_error_bucket_field(entry, "type"),
+            _fallback_error_bucket_field(entry, "code"),
+        )
+        for entry in entries
+    )
+    error_counts: Final = [
+        FallbackErrorCount(
+            type=error_type,
+            code=error_code,
+            count=counts[(error_type, error_code)],
+        )
+        for error_type, error_code in sorted(counts)
+    ]
+    return AggregatedFallbackErrors(status="success", errors=error_counts)
 
 
 def _add_headers_to_response(response: object, headers: dict[str, object]) -> object:

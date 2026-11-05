@@ -1,5 +1,6 @@
 import json
 from collections.abc import Mapping
+from copy import deepcopy
 from typing import Final, Literal
 
 import pytest
@@ -8,6 +9,7 @@ from pydantic import BaseModel
 from litellm.litellm_core_utils.add_retry_fallback_headers import (
     add_fallback_headers_to_response,
     add_retry_headers_to_response,
+    aggregate_fallback_errors_from_headers,
     complexity_router_decision_headers,
     ensure_response_additional_headers,
     get_fallback_errors_from_headers,
@@ -197,15 +199,8 @@ def test_add_fallback_headers_serializes_fallback_errors():
     )
 
     assert result is response
-    assert response._hidden_params["additional_headers"][
-        "x-litellm-attempted-fallbacks"
-    ] == 1
-    assert (
-        json.loads(
-            response._hidden_params["additional_headers"]["x-litellm-fallback-errors"]
-        )
-        == fallback_errors
-    )
+    assert response._hidden_params["additional_headers"]["x-litellm-attempted-fallbacks"] == 1
+    assert json.loads(response._hidden_params["additional_headers"]["x-litellm-fallback-errors"]) == fallback_errors
 
 
 def test_add_retry_headers_to_streaming_wrapper():
@@ -231,9 +226,7 @@ def test_get_hidden_params_dict_with_pydantic_model_hidden_params():
 
     class Response:
         def __init__(self):
-            self._hidden_params = InnerHiddenParams(
-                additional_headers={"x-custom": "value"}
-            )
+            self._hidden_params = InnerHiddenParams(additional_headers={"x-custom": "value"})
 
     result = get_hidden_params_dict(Response())
     assert result == {"additional_headers": {"x-custom": "value"}}
@@ -321,9 +314,7 @@ def test_get_fallback_errors_from_headers_existing_list_passthrough():
 
 
 def test_get_fallback_errors_from_headers_invalid_json_returns_empty():
-    result = get_fallback_errors_from_headers(
-        {"x-litellm-fallback-errors": "not-valid-json-{"}
-    )
+    result = get_fallback_errors_from_headers({"x-litellm-fallback-errors": "not-valid-json-{"})
     assert result == []
 
 
@@ -352,3 +343,140 @@ def test_add_fallback_headers_to_dict_response():
 
     assert result is response
     assert response["_hidden_params"]["additional_headers"]["x-litellm-attempted-fallbacks"] == 1
+
+
+_FALLBACK_ERROR_ENTRIES: Final = [
+    {"message": "rate limited", "type": "RateLimitError", "param": None, "code": "429"},
+    {"message": "rate limited again", "type": "RateLimitError", "param": "messages", "code": "429"},
+    {"message": "bad request", "type": "BadRequestError", "param": None, "code": "400"},
+    {"message": "upstream timeout", "type": "APITimeoutError", "param": None, "code": "504"},
+]
+
+
+def _fallback_errors_header(entries: list[object], as_json: bool) -> dict[str, object]:
+    value: Final = json.dumps(entries) if as_json else entries
+    return {"x-litellm-fallback-errors": value, "x-other-header": "keep"}
+
+
+@pytest.mark.parametrize("as_json", [False, True])
+def test_aggregate_fallback_errors_counts_duplicates_and_sorts_by_type_code(
+    as_json: Literal[False, True],
+) -> None:
+    result = aggregate_fallback_errors_from_headers(_fallback_errors_header(_FALLBACK_ERROR_ENTRIES, as_json))
+
+    assert result == {
+        "status": "success",
+        "errors": [
+            {"type": "APITimeoutError", "code": "504", "count": 1},
+            {"type": "BadRequestError", "code": "400", "count": 1},
+            {"type": "RateLimitError", "code": "429", "count": 2},
+        ],
+    }
+
+
+@pytest.mark.parametrize("as_json", [False, True])
+def test_aggregate_fallback_errors_sorts_code_within_type(as_json: Literal[False, True]) -> None:
+    entries: Final = [
+        {"type": "RateLimitError", "code": "500"},
+        {"type": "RateLimitError", "code": "400"},
+        {"type": "RateLimitError", "code": "429"},
+        {"type": "BadRequestError", "code": "400"},
+    ]
+
+    result = aggregate_fallback_errors_from_headers(_fallback_errors_header(entries, as_json))
+
+    assert result["errors"] == [
+        {"type": "BadRequestError", "code": "400", "count": 1},
+        {"type": "RateLimitError", "code": "400", "count": 1},
+        {"type": "RateLimitError", "code": "429", "count": 1},
+        {"type": "RateLimitError", "code": "500", "count": 1},
+    ]
+
+
+@pytest.mark.parametrize("as_json", [False, True])
+def test_aggregate_fallback_errors_buckets_missing_non_string_and_non_dict_entries_as_unknown(
+    as_json: Literal[False, True],
+) -> None:
+    entries: Final = [
+        {"type": "AuthError", "code": None},
+        {"type": 401, "code": "expired-key"},
+        {"code": "500"},
+        {},
+        "bare-string-entry",
+        123,
+        None,
+    ]
+
+    result = aggregate_fallback_errors_from_headers(_fallback_errors_header(entries, as_json))
+
+    assert result == {
+        "status": "success",
+        "errors": [
+            {"type": "AuthError", "code": "unknown", "count": 1},
+            {"type": "unknown", "code": "500", "count": 1},
+            {"type": "unknown", "code": "expired-key", "count": 1},
+            {"type": "unknown", "code": "unknown", "count": 4},
+        ],
+    }
+    assert sum(row["count"] for row in result["errors"]) == len(entries)
+
+
+def test_aggregate_fallback_errors_never_returns_raw_fields() -> None:
+    entries: Final = [
+        {
+            "message": "secret prompt contents",
+            "type": "RateLimitError",
+            "param": "messages",
+            "code": "429",
+            "upstream_host": "upstream.example",
+            "trace_id": "abc-123",
+        }
+    ]
+
+    result = aggregate_fallback_errors_from_headers(_fallback_errors_header(entries, False))
+
+    assert result == {
+        "status": "success",
+        "errors": [{"type": "RateLimitError", "code": "429", "count": 1}],
+    }
+    assert set(result.keys()) == {"status", "errors"}
+    assert all(set(row.keys()) == {"type", "code", "count"} for row in result["errors"])
+    serialized: Final = json.dumps(result)
+    assert "secret prompt contents" not in serialized
+    assert "messages" not in serialized
+    assert "upstream.example" not in serialized
+    assert "abc-123" not in serialized
+
+
+@pytest.mark.parametrize("raw", ['{"not": "a list"}', "5", "null", '"a-string"', "not-valid-json-{", ""])
+def test_aggregate_fallback_errors_invalid_or_non_list_payload_returns_parse_error(raw: str) -> None:
+    result = aggregate_fallback_errors_from_headers({"x-litellm-fallback-errors": raw})
+
+    assert result == {"status": "parse_error", "errors": []}
+
+
+@pytest.mark.parametrize(
+    "headers",
+    [
+        {"x-litellm-fallback-errors": []},
+        {"x-litellm-fallback-errors": "[]"},
+        {"x-litellm-fallback-errors": None},
+        {},
+    ],
+)
+def test_aggregate_fallback_errors_empty_or_absent_returns_empty_success(
+    headers: dict[str, object],
+) -> None:
+    assert aggregate_fallback_errors_from_headers(headers) == {"status": "success", "errors": []}
+
+
+@pytest.mark.parametrize("as_json", [False, True])
+def test_aggregate_fallback_errors_does_not_modify_additional_headers(
+    as_json: Literal[False, True],
+) -> None:
+    headers: Final = _fallback_errors_header(_FALLBACK_ERROR_ENTRIES, as_json)
+    snapshot: Final = deepcopy(headers)
+
+    aggregate_fallback_errors_from_headers(headers)
+
+    assert headers == snapshot
