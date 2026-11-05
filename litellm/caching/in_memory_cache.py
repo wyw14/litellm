@@ -14,7 +14,11 @@ import sys
 import threading
 import time
 from collections.abc import Callable
+from dataclasses import dataclass
+from enum import Enum
 from typing import TYPE_CHECKING, Any, Final
+
+from typing_extensions import assert_never
 
 if TYPE_CHECKING:
     from litellm.types.caching import RedisPipelineIncrementOperation
@@ -26,6 +30,24 @@ from litellm.constants import MAX_SIZE_PER_ITEM_IN_MEMORY_CACHE_IN_KB
 from .base_cache import BaseCache
 
 DEFAULT_MAX_SIZE_IN_MEMORY: Final = 200
+_REMOVAL_SENTINEL: Final = object()
+
+
+class EvictionReason(Enum):
+    CAPACITY = "capacity"
+    TTL = "ttl"
+    EXPLICIT_DELETE = "explicit_delete"
+    CLEAR = "clear"
+
+
+@dataclass(frozen=True, slots=True)
+class LocalCacheEvictionStats:
+    """Entry-removal counters for InMemoryCache. Counts only, never keys or values."""
+
+    capacity_evictions: int = 0
+    ttl_expirations: int = 0
+    explicit_deletions: int = 0
+    cleared_entries: int = 0
 
 
 class InMemoryCache(BaseCache):
@@ -36,9 +58,12 @@ class InMemoryCache(BaseCache):
         | None = 600,  # default ttl is 10 minutes. At maximum litellm rate limiting logic requires objects to be in memory for 1 minute
         max_size_per_item: int | None = 1024,  # 1MB = 1024KB
         clock: Callable[[], float] | None = None,
+        track_eviction_stats: bool = False,
     ):
         """
         max_size_in_memory [int]: Maximum number of items in cache. done to prevent memory leaks. Use 200 items as a default
+
+        track_eviction_stats [bool]: When True, count why entries are removed. Read the counts with get_eviction_stats(). Counting is observation only and never changes eviction order
         """
         self.max_size_in_memory = (
             max_size_in_memory if max_size_in_memory is not None else DEFAULT_MAX_SIZE_IN_MEMORY
@@ -53,6 +78,13 @@ class InMemoryCache(BaseCache):
         self._increment_lock = threading.Lock()
         self._write_lock = threading.Lock()
         self._clock = clock if clock is not None else lambda: time.time()
+
+        self._track_eviction_stats = track_eviction_stats
+        self._eviction_stats_lock = threading.Lock()
+        self._capacity_eviction_count = 0
+        self._ttl_expiration_count = 0
+        self._explicit_deletion_count = 0
+        self._cleared_entry_count = 0
 
     def check_value_size(self, value: Any):
         """
@@ -103,12 +135,55 @@ class InMemoryCache(BaseCache):
     def _cache_keys(self) -> tuple[str, ...]:
         return tuple(self.cache_dict)  # pyright: ignore[reportUnknownVariableType]  # cache_dict is untyped legacy state
 
-    def _remove_key(self, key: str) -> None:
+    def _remove_key(self, key: str) -> bool:
         """
-        Remove a key from both cache_dict and ttl_dict
+        Remove a key from both cache_dict and ttl_dict.
+        Returns True only when a live cache entry was actually removed,
+        so each disappearance is counted at most once.
         """
-        self.cache_dict.pop(key, None)
+        removed: Final = self.cache_dict.pop(key, _REMOVAL_SENTINEL) is not _REMOVAL_SENTINEL
         self.ttl_dict.pop(key, None)
+        return removed
+
+    def _record_eviction(self, reason: EvictionReason, amount: int = 1) -> None:
+        if not self._track_eviction_stats or amount == 0:
+            return
+        with self._eviction_stats_lock:
+            match reason:
+                case EvictionReason.CAPACITY:
+                    self._capacity_eviction_count += amount
+                case EvictionReason.TTL:
+                    self._ttl_expiration_count += amount
+                case EvictionReason.EXPLICIT_DELETE:
+                    self._explicit_deletion_count += amount
+                case EvictionReason.CLEAR:
+                    self._cleared_entry_count += amount
+                case _:
+                    assert_never(reason)
+
+    def get_eviction_stats(self) -> LocalCacheEvictionStats | None:
+        """
+        Return current removal-reason counters. Returns None when tracking is disabled.
+        Counters are integers only, no keys or cached values are exposed.
+        """
+        if not self._track_eviction_stats:
+            return None
+        with self._eviction_stats_lock:
+            return LocalCacheEvictionStats(
+                capacity_evictions=self._capacity_eviction_count,
+                ttl_expirations=self._ttl_expiration_count,
+                explicit_deletions=self._explicit_deletion_count,
+                cleared_entries=self._cleared_entry_count,
+            )
+
+    def reset_eviction_stats(self) -> None:
+        if not self._track_eviction_stats:
+            return
+        with self._eviction_stats_lock:
+            self._capacity_eviction_count = 0
+            self._ttl_expiration_count = 0
+            self._explicit_deletion_count = 0
+            self._cleared_entry_count = 0
 
     def evict_cache(self):
         """
@@ -135,7 +210,8 @@ class InMemoryCache(BaseCache):
             # Case 2: Entry is valid but expired
             elif expiration_time <= current_time:
                 heapq.heappop(self.expiration_heap)
-                self._remove_key(key)
+                if self._remove_key(key):
+                    self._record_eviction(EvictionReason.TTL)
             else:
                 # Case 3: Entry is valid and not expired
                 break
@@ -148,14 +224,15 @@ class InMemoryCache(BaseCache):
         while self.expiration_heap and len(self.cache_dict) >= self.max_size_in_memory:
             expiration_time, key = heapq.heappop(self.expiration_heap)
             # Skip if key was removed or updated
-            if self.ttl_dict.get(key) == expiration_time:
-                self._remove_key(key)
+            if self.ttl_dict.get(key) == expiration_time and self._remove_key(key):
+                self._record_eviction(EvictionReason.CAPACITY)
 
         if not self.expiration_heap:
             untracked_keys: Final = self._cache_keys()
             overflow: Final = len(untracked_keys) - self.max_size_in_memory + 1
             for untracked_key in untracked_keys[: max(overflow, 0)]:
-                self._remove_key(untracked_key)
+                if self._remove_key(untracked_key):
+                    self._record_eviction(EvictionReason.CAPACITY)
 
         # de-reference the removed item
         # https://www.geeksforgeeks.org/diagnosing-and-fixing-memory-leaks-in-python/
@@ -222,7 +299,8 @@ class InMemoryCache(BaseCache):
         Returns False if the element is not expired
         """
         if self._is_key_expired(key):
-            self._remove_key(key)
+            if self._remove_key(key):
+                self._record_eviction(EvictionReason.TTL)
             return True
         return False
 
@@ -282,15 +360,18 @@ class InMemoryCache(BaseCache):
 
     def flush_cache(self):
         with self._write_lock:
+            cleared_entries: Final = len(self._cache_keys())
             self.cache_dict.clear()
             self.ttl_dict.clear()
             self.expiration_heap.clear()
+            self._record_eviction(EvictionReason.CLEAR, amount=cleared_entries)
 
     async def disconnect(self):
         pass
 
     def delete_cache(self, key: str) -> None:
-        self._remove_key(key)
+        if self._remove_key(key):
+            self._record_eviction(EvictionReason.EXPLICIT_DELETE)
 
     async def async_get_ttl(self, key: str) -> int | None:
         """

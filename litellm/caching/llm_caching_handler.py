@@ -36,11 +36,12 @@ class LLMClientCache(InMemoryCache):
         )
         self.evicted_client_closer = evicted_client_closer or default_evicted_client_closer
 
-    def _remove_key(self, key: str) -> None:
+    def _remove_key(self, key: str) -> bool:
         evicted: Final[object] = self.cache_dict.get(key)
-        super()._remove_key(key)
+        removed: Final = super()._remove_key(key)
         self.evicted_client_closer.schedule(evicted)
         self.evicted_client_closer.reap()
+        return removed
 
     def update_cache_key_with_event_loop(self, key: str) -> str:
         """

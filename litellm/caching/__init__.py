@@ -2,7 +2,7 @@ from .azure_blob_cache import AzureBlobCache
 from .caching import Cache, LiteLLMCacheType
 from .dual_cache import DualCache
 from .gcs_cache import GCSCache
-from .in_memory_cache import InMemoryCache
+from .in_memory_cache import InMemoryCache, LocalCacheEvictionStats
 from .qdrant_semantic_cache import QdrantSemanticCache
 from .redis_cache import RedisCache
 from .redis_cluster_cache import RedisClusterCache

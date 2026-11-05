@@ -6,6 +6,7 @@ import threading
 import time
 from collections.abc import Iterator
 from concurrent.futures import ThreadPoolExecutor
+from dataclasses import asdict, fields
 from typing import Final
 from unittest.mock import MagicMock, patch
 
@@ -16,7 +17,7 @@ from fastapi.testclient import TestClient
 
 from unittest.mock import AsyncMock
 
-from litellm.caching.in_memory_cache import InMemoryCache
+from litellm.caching.in_memory_cache import InMemoryCache, LocalCacheEvictionStats
 
 
 class _SlowInt(int):
@@ -392,3 +393,223 @@ async def test_async_increment_pipeline_keeps_each_key_for_its_own_ttl() -> None
 
     assert cache.get_cache("minute") is None
     assert cache.get_cache("day") == 1
+
+
+class _ControlledClock:
+    def __init__(self, now: float = 0.0) -> None:
+        self.now = now
+
+    def __call__(self) -> float:
+        return self.now
+
+
+def _stats_tracking_cache(max_size_in_memory: int = 2) -> InMemoryCache:
+    return InMemoryCache(
+        max_size_in_memory=max_size_in_memory,
+        default_ttl=60,
+        clock=_ControlledClock(),
+        track_eviction_stats=True,
+    )
+
+
+def test_eviction_stats_are_opt_in_and_disabled_cache_still_evicts() -> None:
+    cache = InMemoryCache(max_size_in_memory=1)
+    cache.set_cache("a", "va", ttl=100)
+    cache.set_cache("b", "vb", ttl=100)
+
+    assert cache.get_eviction_stats() is None
+    cache.reset_eviction_stats()
+    assert "a" not in cache.cache_dict
+    assert cache.get_cache("b") == "vb"
+
+
+def test_eviction_stats_expose_only_integer_counts_never_keys_or_values() -> None:
+    cache = _stats_tracking_cache()
+    cache.set_cache("secret-key", {"response": "secret-value"}, ttl=100)
+    cache.delete_cache("secret-key")
+
+    stats = cache.get_eviction_stats()
+    assert stats is not None
+    assert {field.name for field in fields(stats)} == {
+        "capacity_evictions",
+        "ttl_expirations",
+        "explicit_deletions",
+        "cleared_entries",
+    }
+    assert all(isinstance(getattr(stats, field.name), int) for field in fields(stats))
+    assert "secret" not in json.dumps(asdict(stats))
+
+
+def test_eviction_stats_count_each_reason_once_per_removed_entry() -> None:
+    clock: Final = _ControlledClock()
+    cache: Final = InMemoryCache(max_size_in_memory=2, default_ttl=60, clock=clock, track_eviction_stats=True)
+
+    cache.set_cache("a", "va", ttl=100)
+    cache.set_cache("b", "vb", ttl=200)
+    cache.set_cache("c", "vc", ttl=300)
+    assert cache.get_eviction_stats() == LocalCacheEvictionStats(capacity_evictions=1)
+
+    clock.now = 201.0
+    assert cache.get_cache("b") is None
+    assert cache.get_cache("b") is None
+    assert cache.get_eviction_stats() == LocalCacheEvictionStats(capacity_evictions=1, ttl_expirations=1)
+
+    assert cache.get_cache("c") == "vc"
+    cache.delete_cache("c")
+    cache.delete_cache("c")
+    assert cache.get_eviction_stats() == LocalCacheEvictionStats(
+        capacity_evictions=1, ttl_expirations=1, explicit_deletions=1
+    )
+
+    cache.set_cache("d", "vd", ttl=400)
+    cache.set_cache("e", "ve", ttl=500)
+    cache.flush_cache()
+    assert cache.get_eviction_stats() == LocalCacheEvictionStats(
+        capacity_evictions=1,
+        ttl_expirations=1,
+        explicit_deletions=1,
+        cleared_entries=2,
+    )
+
+    cache.flush_cache()
+    assert cache.get_eviction_stats().cleared_entries == 2
+
+
+def test_expired_entries_swept_during_set_count_ttl_once() -> None:
+    clock: Final = _ControlledClock()
+    cache: Final = InMemoryCache(max_size_in_memory=10, clock=clock, track_eviction_stats=True)
+    for name in ("a", "b", "c"):
+        cache.set_cache(name, "v", ttl=10)
+
+    clock.now = 11.0
+    cache.set_cache("d", "v", ttl=100)
+
+    assert cache.get_eviction_stats() == LocalCacheEvictionStats(ttl_expirations=3)
+    for name in ("a", "b", "c"):
+        assert cache.get_cache(name) is None
+    assert cache.get_eviction_stats().ttl_expirations == 3
+
+
+def test_deleting_an_expired_entry_before_a_lazy_read_counts_as_explicit_delete() -> None:
+    clock: Final = _ControlledClock()
+    cache: Final = InMemoryCache(max_size_in_memory=10, clock=clock, track_eviction_stats=True)
+    cache.set_cache("a", "v", ttl=10)
+    clock.now = 11.0
+
+    cache.delete_cache("a")
+
+    assert cache.get_eviction_stats() == LocalCacheEvictionStats(explicit_deletions=1)
+
+
+def test_capacity_evictions_without_usable_expiry_heap_entries_are_counted() -> None:
+    cache: Final = InMemoryCache(max_size_in_memory=10, track_eviction_stats=True)
+    for i in range(30):
+        cache.set_cache(f"nan_{i}", "response", ttl="NaN")
+
+    assert len(cache.cache_dict) == 10
+    assert cache.get_eviction_stats() == LocalCacheEvictionStats(capacity_evictions=20)
+
+
+def test_zero_capacity_caches_nothing_and_counts_no_evictions() -> None:
+    cache: Final = InMemoryCache(max_size_in_memory=0, track_eviction_stats=True)
+    for i in range(5):
+        cache.set_cache(f"k_{i}", "v")
+
+    assert cache.cache_dict == {}
+    assert cache.get_eviction_stats() == LocalCacheEvictionStats()
+    cache.flush_cache()
+    assert cache.get_eviction_stats() == LocalCacheEvictionStats()
+
+
+def test_reset_eviction_stats_zeros_counters_and_counting_resumes() -> None:
+    cache: Final = _stats_tracking_cache()
+    cache.set_cache("a", "va", ttl=100)
+    cache.set_cache("b", "vb", ttl=200)
+    cache.set_cache("c", "vc", ttl=300)
+    assert cache.get_eviction_stats().capacity_evictions == 1
+
+    cache.reset_eviction_stats()
+    assert cache.get_eviction_stats() == LocalCacheEvictionStats()
+
+    cache.delete_cache("b")
+    assert cache.get_eviction_stats() == LocalCacheEvictionStats(explicit_deletions=1)
+
+
+def test_expired_entry_removed_by_a_nested_reader_counts_ttl_once() -> None:
+    cache: Final = _AnotherReaderExpiresTheEntryFirstCache(track_eviction_stats=True)
+    cache.set_cache("tokenizer_failure", "HF unavailable", ttl=-1)
+
+    assert cache.get_cache("tokenizer_failure") is None
+    assert cache.other_reader_result is None
+    assert cache.get_eviction_stats() == LocalCacheEvictionStats(ttl_expirations=1)
+
+
+def test_tracking_stats_does_not_change_eviction_order_or_contents() -> None:
+    clock_plain: Final = _ControlledClock()
+    clock_tracked: Final = _ControlledClock()
+    plain: Final = InMemoryCache(max_size_in_memory=3, default_ttl=60, clock=clock_plain)
+    tracked: Final = InMemoryCache(max_size_in_memory=3, default_ttl=60, clock=clock_tracked, track_eviction_stats=True)
+
+    def assert_same_state() -> None:
+        assert sorted(tracked.cache_dict.items()) == sorted(plain.cache_dict.items())
+        assert sorted(tracked.ttl_dict) == sorted(plain.ttl_dict)
+
+    for i, ttl in enumerate((10, 10, 10, 100)):
+        plain.set_cache(f"k_{i}", f"v_{i}", ttl=ttl)
+        tracked.set_cache(f"k_{i}", f"v_{i}", ttl=ttl)
+        assert_same_state()
+
+    clock_plain.now = 11.0
+    clock_tracked.now = 11.0
+    plain.set_cache("k_4", "v_4", ttl=200)
+    tracked.set_cache("k_4", "v_4", ttl=200)
+    assert_same_state()
+
+    for key in ("k_0", "k_1", "k_2", "k_3", "k_4"):
+        assert plain.get_cache(key) == tracked.get_cache(key)
+    assert_same_state()
+
+    plain.delete_cache("k_4")
+    tracked.delete_cache("k_4")
+    assert_same_state()
+
+    plain.flush_cache()
+    tracked.flush_cache()
+    assert_same_state()
+
+
+@pytest.mark.usefixtures("fine_grained_thread_switching")
+def test_eviction_stats_concurrent_reads_and_deletes_count_each_entry_once() -> None:
+    clock: Final = _ControlledClock()
+    cache: Final = InMemoryCache(max_size_in_memory=200, default_ttl=10, clock=clock, track_eviction_stats=True)
+    for i in range(50):
+        cache.set_cache(f"exp_{i}", "v", ttl=10)
+    for i in range(20):
+        cache.set_cache(f"del_{i}", "v", ttl=1_000)
+
+    clock.now = 11.0
+    reader_count: Final = 8
+    deleter_count: Final = 4
+    barrier: Final = threading.Barrier(reader_count + deleter_count)
+
+    def read_expired(_: int) -> None:
+        barrier.wait()
+        for _ in range(2):
+            for i in range(50):
+                assert cache.get_cache(f"exp_{i}") is None
+
+    def delete_repeatedly(_: int) -> None:
+        barrier.wait()
+        for _ in range(3):
+            for i in range(20):
+                cache.delete_cache(f"del_{i}")
+
+    with ThreadPoolExecutor(max_workers=reader_count + deleter_count) as executor:
+        read_results = executor.map(read_expired, range(reader_count))
+        delete_results = executor.map(delete_repeatedly, range(deleter_count))
+        read_futures: Final = tuple(read_results)
+        delete_futures: Final = tuple(delete_results)
+
+    assert read_futures == (None,) * reader_count
+    assert delete_futures == (None,) * deleter_count
+    assert cache.get_eviction_stats() == LocalCacheEvictionStats(ttl_expirations=50, explicit_deletions=20)
