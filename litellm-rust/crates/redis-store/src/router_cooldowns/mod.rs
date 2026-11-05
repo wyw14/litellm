@@ -10,17 +10,9 @@ use crate::{
     Error, Number, Pending, Send,
     memory::{Clock, Memory, system_clock},
     remote::{Remote, RemoteSlot},
-    tier::{MemoryTier, OnBreakerOpen, TierPolicy},
+    tier::{MemoryTier, TierPolicy},
 };
 
-/// `main`'s cooldown tier: `DEFAULT_COOLDOWN_REDIS_READ_INTERVAL_SECONDS` (1 s), `InMemoryCache`'s
-/// 600 s default for backfilled entries and `DEFAULT_MAX_REDIS_BATCH_CACHE_SIZE`.
-pub const POLICY: TierPolicy = TierPolicy {
-    refresh_after: Duration::from_secs(1),
-    backfill_ttl: Duration::from_secs(600),
-    on_breaker_open: OnBreakerOpen::ServeMemory,
-    tracked_reads: 1000,
-};
 const MAX_CORRECTED_TTL: Duration = Duration::from_secs(60);
 const CORRECTION_SLACK: Duration = Duration::from_secs(5);
 

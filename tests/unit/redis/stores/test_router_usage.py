@@ -9,8 +9,9 @@ from litellm import Router
 from litellm._internal_context import current_service_target
 from litellm.caching.redis_batch import drain_post_call_redis_batches, request_redis_batch_scope
 from litellm.caching.redis_cache import RedisCache
-from litellm.redis.stores._connection import native_client
-from litellm.redis.stores.router_usage import NativeCounter, RouterUsageStore, UsageCounter
+from litellm.redis.stores.connection import connect
+from litellm.redis.stores.router_usage import RouterUsageStore, UsageCounter
+from litellm.redis.stores.router_usage.types import NativeCounter
 from litellm.rust_bridge._native import NativeRedisClient
 from tests.unit.caching.test_redis_batch import FakeNatives, fake_send
 
@@ -29,7 +30,7 @@ class FakeUsage:
     counts: dict[NativeCounter, float] = field(default_factory=dict)
     calls: list[tuple[str, object, str | None]] = field(default_factory=list)
 
-    def attach(self, client: NativeRedisClient, redis_ttl_seconds: int = 60, /) -> bool:
+    def attach(self, client: NativeRedisClient, /) -> bool:
         attached: Final = not self.connected
         self.connected = True
         return attached
@@ -79,7 +80,7 @@ async def test_counters_cross_the_bridge_as_domain_tuples_under_the_router_usage
     counter: Final = UsageCounter("dep", None, "12-34", "rpm")
 
     await store.async_increment(counter, 1, 60)
-    await store.increment_deployment("dep", "model", "12-34", 7.5, 1, None)
+    await store.increment_deployment("dep", "model", "12-34", 7.5, 1)
 
     assert handles.built[0].calls == [
         ("increment", (("dep", None, "12-34", "rpm"), 1, 60), "router_usage"),
@@ -92,8 +93,8 @@ async def test_counters_cross_the_bridge_as_domain_tuples_under_the_router_usage
 async def test_late_attach_keeps_the_counts_this_router_already_holds() -> None:
     store: Final = RouterUsageStore(None)
     counters: Final = (UsageCounter("dep", "model", "12-34", "tpm"), UsageCounter("dep", "model", "12-34", "rpm"))
-    await store.increment_deployment("dep", "model", "12-34", 7.5, 1, None)
-    store.attach_redis(native_client(RedisCache(host="redis.internal").native_settings))
+    await store.increment_deployment("dep", "model", "12-34", 7.5, 1)
+    store.attach_redis(connect(RedisCache(host="redis.internal")))
     assert await store.async_batch_get(counters) == [7.5, 1]
 
 
@@ -104,7 +105,7 @@ async def test_router_reset_clears_usage_and_failure_counters(operation: str) ->
     usage: Final = router._core_usage_store
     cooldowns: Final = router._core_cooldown_cache.cooldown_store
     counters: Final = (UsageCounter("dep", "model", "12-34", "tpm"), UsageCounter("dep", "model", "12-34", "rpm"))
-    await usage.increment_deployment("dep", "model", "12-34", 7, 1, None)
+    await usage.increment_deployment("dep", "model", "12-34", 7, 1)
     assert await usage.async_batch_get(counters) == [7, 1]
     assert cooldowns.increment_allowed_fails("dep", None, 30.0) == 1
     getattr(router, operation)()
@@ -118,9 +119,9 @@ async def test_inside_a_request_deployment_increments_go_out_on_their_own_trip_l
     store: Final = RouterUsageStore(None, handle=handles)
     natives: Final = FakeNatives()
 
-    await store.increment_deployment("dep", "model", "12-34", 7.5, 1, None)
+    await store.increment_deployment("dep", "model", "12-34", 7.5, 1)
     with request_redis_batch_scope(post_call_deadline=60, native_factory=natives, native_send_factory=fake_send):  # pyright: ignore[reportArgumentType]  # test double
-        await store.increment_deployment("dep", "model", "12-34", 2, 1, None)
+        await store.increment_deployment("dep", "model", "12-34", 2, 1)
     await drain_post_call_redis_batches()
 
     assert [call[0] for call in handles.built[0].calls] == ["deployment", "deployment"]

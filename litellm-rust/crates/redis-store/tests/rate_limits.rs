@@ -11,11 +11,11 @@ use litellm_redis_store::{
         AcquireReply, Applied, AtomicCounter, AtomicReply, Counter, Entry, Gauge, GuardedIncrement,
         GuardedReply, Increment, Kind, Local, RateLimits, Scope, WindowCount,
     },
-    router_cooldowns::{POLICY as COOLDOWN_POLICY, RouterCooldowns},
+    router_cooldowns::RouterCooldowns,
 };
 use litellm_redis_testing::{RedisDeployment, Topology};
 use rstest::rstest;
-use support::{connect, connect_observed, remote, within};
+use support::{COOLDOWN_POLICY, connect, connect_observed, remote, within};
 use tokio::runtime::Handle;
 
 const SLOT_TTL: Duration = Duration::from_secs(3600);

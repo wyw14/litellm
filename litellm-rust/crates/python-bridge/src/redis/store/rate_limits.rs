@@ -138,14 +138,13 @@ where
 #[pymethods]
 impl NativeRateLimits {
     #[new]
-    #[pyo3(signature = (client, backfill_ttl_seconds = None, redis_ttl_seconds = 60))]
+    #[pyo3(signature = (client, backfill_ttl_seconds = None))]
     fn new(
         client: Option<PyRef<'_, NativeRedisClient>>,
         backfill_ttl_seconds: Option<f64>,
-        redis_ttl_seconds: u64,
     ) -> Self {
         Self(Arc::new(RateLimits::new(
-            client.map(|client| remote(&client, redis_ttl_seconds)),
+            client.map(|client| remote(&client)),
             ttl(backfill_ttl_seconds),
         )))
     }

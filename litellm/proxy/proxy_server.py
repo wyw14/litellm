@@ -881,7 +881,7 @@ from litellm.proxy.telemetry.middleware import TelemetryMiddleware
 from litellm.proxy.telemetry.runtime import TelemetryRuntime
 from litellm.proxy.telemetry.settings import describe_errors as describe_telemetry_errors
 from litellm.proxy.telemetry.settings import load_settings as load_telemetry_settings
-from litellm.redis.stores._connection import native_client
+from litellm.redis.stores.connection import connect
 from litellm.redis.stores.spend_counters import (
     SPEND_COUNTERS_TARGET,
     SpendCounterStore,
@@ -5342,9 +5342,7 @@ def _attach_redis_usage_cache(redis_cache: RedisCache, enable_redis_auth_cache: 
         redis_cache,
         default_redis_ttl=litellm.default_redis_ttl,
     )
-    native_settings: Final = redis_cache.native_settings
-    if native_settings is not None:
-        spend_counter_store.attach_redis(native_client(native_settings), redis_ttl=native_settings.default_ttl)
+    spend_counter_store.attach_redis(connect(redis_cache))
     cli_sso_session_cache.attach_redis_cache(
         redis_cache,
         default_redis_ttl=CLI_SSO_SESSION_TTL_SECONDS,

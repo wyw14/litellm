@@ -13,7 +13,7 @@ from litellm._internal_context import current_service_target
 from litellm.caching.redis_batch import Batch, request_redis_batch_scope
 from litellm.caching.redis_cache import RedisCache, redis_breaker_state_counts
 from litellm.integrations.custom_secret_manager import CustomSecretManager
-from litellm.redis.stores._connection import native_client
+from litellm.redis.stores.connection import RedisConnection, connect
 from litellm.redis.stores.router_cooldowns import CooldownCacheValue, RouterCooldownStore
 from litellm.rust_bridge._native import NativeRedisClient, NativeRouterCooldowns
 from litellm.rust_bridge.host import settings
@@ -81,7 +81,7 @@ class FakeCooldowns:
     smallest: float | None = None
     declared: list[tuple[str, ...]] = field(default_factory=list)
 
-    def attach(self, client: NativeRedisClient, redis_ttl_seconds: int = 60, /) -> bool:
+    def attach(self, client: NativeRedisClient, /) -> bool:
         attached: Final = self.client is None
         self.client = self.client or client
         return attached
@@ -129,10 +129,10 @@ class Handles:
         return handle
 
 
-def _client(namespace: str | None = None) -> NativeRedisClient:
-    client: Final = native_client(RedisCache(host="redis.internal", port=6380, namespace=namespace))
-    assert client is not None
-    return client
+def _client(namespace: str | None = None) -> RedisConnection:
+    connection: Final = connect(RedisCache(host="redis.internal", port=6380, namespace=namespace))
+    assert connection is not None
+    return connection
 
 
 def test_late_attach_keeps_the_cooldowns_this_router_already_holds() -> None:
@@ -146,7 +146,7 @@ def test_late_attach_keeps_the_cooldowns_this_router_already_holds() -> None:
     store.put("dep", entry, 60.0)
     store.attach_redis(None)
     store.attach_redis(_client())
-    assert store.active_sync(["dep"], None) == (("dep", entry),)
+    assert store.active_sync(["dep"]) == (("dep", entry),)
 
 
 def test_writes_and_reads_carry_the_router_cooldowns_service_target() -> None:
@@ -166,7 +166,7 @@ def test_minimum_falls_back_to_the_default_when_nothing_or_zero_is_stored(
     handles: Final = Handles()
     store: Final = RouterCooldownStore(None, handle=handles)
     handles.built[0].smallest = smallest
-    assert store.minimum(["dep"], 60.0, None) == expected
+    assert store.minimum(["dep"], 60.0) == expected
 
 
 @pytest.mark.parametrize("case", _WIRE_COOLDOWNS, ids=("rate-limit", "timeout"))
@@ -186,7 +186,7 @@ def test_a_redis_setting_the_native_client_cannot_honor_never_fails_construction
 ) -> None:
     redis: Final = RedisCache(host="127.0.0.1", port=1, **setting)
     with caplog.at_level(logging.WARNING):
-        store: Final = RouterCooldownStore(native_client(redis))
+        store: Final = RouterCooldownStore(connect(redis))
     cooldown: Final = CooldownCacheValue(
         exception_received="model", status_code="429", timestamp=time.time(), cooldown_time=120.0
     )
@@ -223,7 +223,7 @@ def test_the_native_client_reads_redis_secrets_through_the_secret_manager(monkey
     configured: Final = settings.secret_manager
     monkeypatch.setattr(settings, "secret_manager", lambda: replace(configured(), native=False))
 
-    NativeRedisClient.connect({"host": "127.0.0.1", "port": 1}, namespace="secret-manager-test")
+    NativeRedisClient.connect({"host": "127.0.0.1", "port": 1}, default_ttl_seconds=60, namespace="secret-manager-test")
 
     assert "REDIS_PASSWORD" in manager.asked
 
@@ -233,7 +233,9 @@ def test_the_native_breaker_counts_in_the_redis_breaker_state_gauge(monkeypatch:
     monkeypatch.setenv("REDIS_CIRCUIT_BREAKER_FAILURE_THRESHOLD", "1")
     open_before: Final = redis_breaker_state_counts().get("open", 0)
     store: Final = NativeRouterCooldowns(
-        NativeRedisClient.connect({"host": "127.0.0.1", "port": 1}, namespace="breaker-gauge-test")
+        NativeRedisClient.connect(
+            {"host": "127.0.0.1", "port": 1}, default_ttl_seconds=60, namespace="breaker-gauge-test"
+        )
     )
 
     store.put("model", _entry("model"), 60.0)

@@ -119,11 +119,15 @@ def secret_manager_binding() -> SecretManagerBinding:
 
 def router_tiers() -> RouterTierSettings:
     import litellm
-    from litellm.constants import DEFAULT_COOLDOWN_REDIS_READ_INTERVAL_SECONDS, DEFAULT_MAX_REDIS_BATCH_CACHE_SIZE
+    from litellm.constants import (
+        DEFAULT_COOLDOWN_REDIS_READ_INTERVAL_SECONDS,
+        DEFAULT_MAX_REDIS_BATCH_CACHE_SIZE,
+        DEFAULT_REDIS_BATCH_CACHE_EXPIRY_SECONDS,
+    )
 
     return RouterTierSettings(
         cooldown_redis_read_interval=DEFAULT_COOLDOWN_REDIS_READ_INTERVAL_SECONDS,
-        usage_redis_read_interval=litellm.default_redis_batch_cache_expiry or 10,
+        usage_redis_read_interval=litellm.default_redis_batch_cache_expiry or DEFAULT_REDIS_BATCH_CACHE_EXPIRY_SECONDS,
         max_redis_batch_cache_size=DEFAULT_MAX_REDIS_BATCH_CACHE_SIZE,
     )
 

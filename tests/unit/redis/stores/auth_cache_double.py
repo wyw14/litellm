@@ -10,7 +10,7 @@ from unittest.mock import MagicMock
 
 from litellm.caching.redis_cache import RedisCache
 from litellm.proxy.common_utils.user_api_key_cache import UserApiKeyCache
-from litellm.redis.stores.auth_cache import AuthCacheSettings, WriteBack
+from litellm.redis.stores.auth_cache import AuthCacheSettings, AuthCacheStore, WriteBack
 from litellm.rust_bridge._native import NativeRedisClient
 
 T = TypeVar("T")
@@ -155,20 +155,22 @@ class FakeAuthCache:
     def len_local(self) -> tuple[int, int]:
         return (len(self.memory), 0)
 
-    def factory(self, client: NativeRedisClient | None, settings: AuthCacheSettings, redis_ttl: int) -> FakeAuthCache:
+    def factory(self, client: NativeRedisClient | None, settings: AuthCacheSettings) -> FakeAuthCache:
         self.settings.append(settings)
         return self
+
+    def store(self, _redis_cache: RedisCache, settings: AuthCacheSettings) -> AuthCacheStore:
+        return AuthCacheStore(None, settings, handle=self.factory)
 
 
 def shared_cache(
     fake: FakeAuthCache | None = None, connection: RedisCache | None = None, **kwargs: float | None
 ) -> tuple[UserApiKeyCache, FakeAuthCache]:
-    """A ``UserApiKeyCache`` with ``enable_redis_auth_cache`` on, its native store replaced by ``fake``."""
+    """A ``UserApiKeyCache`` with ``enable_redis_auth_cache`` on, its shared store backed by ``fake``."""
     double: Final = fake or FakeAuthCache()
     cache: Final = UserApiKeyCache(
         redis_cache=connection or MagicMock(spec=RedisCache),
-        auth_cache_handle=double.factory,
-        redis_client=lambda _: None,
+        auth_cache=double.store,
         **kwargs,
     )
     return cache, double

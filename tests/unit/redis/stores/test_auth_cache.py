@@ -122,7 +122,7 @@ def test_user_key_objects_live_in_their_own_memory_partition() -> None:
 @pytest.mark.asyncio
 async def test_a_key_the_request_read_found_absent_is_answered_without_another_read_until_written() -> None:
     fake: Final = FakeAuthCache(redis={"team_id:hit": {"team_id": "hit"}})
-    store: Final = AuthCacheStore(None, AuthCacheSettings(200, 60), redis_ttl=60, handle=fake.factory)
+    store: Final = AuthCacheStore(None, AuthCacheSettings(200, 60), handle=fake.factory)
 
     with request_redis_batch_scope(native_factory=FakeNatives(), native_send_factory=fake_send) as request:  # pyright: ignore[reportArgumentType]  # test double
         found = await store.read_missing(["team_id:absent", "team_id:hit"], batch=Batch.PRE_CALL)
@@ -144,7 +144,7 @@ async def test_a_key_the_request_read_found_absent_is_answered_without_another_r
 @pytest.mark.asyncio
 async def test_outside_a_request_a_read_is_a_round_trip_of_its_own() -> None:
     fake: Final = FakeAuthCache(redis={"team_id:t1": {"team_id": "t1"}})
-    store: Final = AuthCacheStore(None, AuthCacheSettings(200, 60), redis_ttl=60, handle=fake.factory)
+    store: Final = AuthCacheStore(None, AuthCacheSettings(200, 60), handle=fake.factory)
 
     assert await store.read_missing(["team_id:t1", "team_id:t2"], batch=Batch.PRE_CALL) == {
         "team_id:t1": {"team_id": "t1"},
@@ -156,7 +156,7 @@ async def test_outside_a_request_a_read_is_a_round_trip_of_its_own() -> None:
 
 def test_only_a_changed_memory_configuration_rebuilds_the_native_store() -> None:
     fake: Final = FakeAuthCache()
-    store: Final = AuthCacheStore(None, AuthCacheSettings(200, 60), redis_ttl=60, handle=fake.factory)
+    store: Final = AuthCacheStore(None, AuthCacheSettings(200, 60), handle=fake.factory)
 
     store.reconfigure(AuthCacheSettings(200, 60))
     store.reconfigure(AuthCacheSettings(500, 5))

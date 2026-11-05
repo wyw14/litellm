@@ -1,6 +1,6 @@
 use std::time::Duration;
 
-use litellm_redis_store::{TierPolicy, router_cooldowns, router_usage};
+use litellm_redis_store::TierPolicy;
 use pyo3::prelude::*;
 
 use crate::{
@@ -13,8 +13,7 @@ const COOLDOWN_REFRESH: FieldSpec<Duration> =
 const USAGE_REFRESH: FieldSpec<Duration> = FieldSpec::new("usage_redis_read_interval", seconds);
 const TRACKED_READS: FieldSpec<usize> = FieldSpec::new("max_redis_batch_cache_size", count);
 
-/// The tier values this Python process runs with. `POLICY` in each family holds `main`'s
-/// defaults, the host reports what its environment and `litellm` globals changed.
+/// The tier values this Python process runs with, from its environment and `litellm` globals.
 #[derive(Debug)]
 pub(crate) struct RouterTierPolicies {
     pub(crate) cooldowns: TierPolicy,
@@ -31,12 +30,10 @@ fn project(snapshot: &Snapshot<'_>) -> Result<RouterTierPolicies, ProjectionErro
         cooldowns: TierPolicy {
             refresh_after: snapshot.read(&COOLDOWN_REFRESH)?,
             tracked_reads,
-            ..router_cooldowns::POLICY
         },
         usage: TierPolicy {
             refresh_after: snapshot.read(&USAGE_REFRESH)?,
             tracked_reads,
-            ..router_usage::POLICY
         },
     })
 }
@@ -79,7 +76,7 @@ mod tests {
     }
 
     #[test]
-    fn the_host_values_replace_only_the_refresh_and_tracked_reads_of_mains_defaults() {
+    fn the_host_values_are_each_familys_refresh_and_tracked_reads() {
         Python::initialize();
         Python::attach(|py| {
             let policies = projected(
@@ -94,14 +91,6 @@ mod tests {
             assert_eq!(policies.usage.refresh_after, Duration::from_secs(30));
             assert_eq!(policies.cooldowns.tracked_reads, 42);
             assert_eq!(policies.usage.tracked_reads, 42);
-            assert_eq!(
-                policies.cooldowns.backfill_ttl,
-                litellm_redis_store::router_cooldowns::POLICY.backfill_ttl
-            );
-            assert_eq!(
-                policies.usage.backfill_ttl,
-                litellm_redis_store::router_usage::POLICY.backfill_ttl
-            );
         });
     }
 

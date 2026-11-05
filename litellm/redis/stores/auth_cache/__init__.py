@@ -5,17 +5,14 @@ from typing import Final
 
 from litellm.caching.redis_batch import Batch, active_request_redis_batches
 from litellm.redis.stores._route import route
-from litellm.redis.stores.auth_cache.handle import AuthCacheHandle, HandleFactory, native_handle
+from litellm.redis.stores.auth_cache.handle import HandleFactory, native_handle
 from litellm.redis.stores.auth_cache.types import AuthCacheSettings, WriteBack
-from litellm.rust_bridge._native import NativeRedisClient
+from litellm.redis.stores.connection import RedisConnection, client_of
 
 __all__ = [
-    "AuthCacheHandle",
     "AuthCacheSettings",
     "AuthCacheStore",
-    "HandleFactory",
     "WriteBack",
-    "native_handle",
 ]
 
 
@@ -29,17 +26,15 @@ class AuthCacheStore:
 
     def __init__(
         self,
-        client: NativeRedisClient | None,
+        connection: RedisConnection | None,
         settings: AuthCacheSettings,
         *,
-        redis_ttl: int,
         handle: HandleFactory = native_handle,
     ) -> None:
-        self._client: Final = client
-        self._redis_ttl: Final = redis_ttl
+        self._client: Final = client_of(connection)
         self._build: Final = handle
         self._settings = settings
-        self._handle = handle(client, settings, redis_ttl)
+        self._handle = handle(self._client, settings)
 
     @property
     def settings(self) -> AuthCacheSettings:
@@ -50,7 +45,7 @@ class AuthCacheStore:
         if settings == self._settings:
             return
         self._settings = settings
-        self._handle = self._build(self._client, settings, self._redis_ttl)
+        self._handle = self._build(self._client, settings)
 
     async def get(self, key: str) -> object:
         request: Final = active_request_redis_batches()

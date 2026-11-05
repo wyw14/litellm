@@ -5,7 +5,8 @@ from typing import Final, Never, TypeVar
 
 from litellm.caching.redis_batch import Batch, NativePending, active_request_redis_batches
 from litellm.redis.stores._route import Route, post_call_request, route
-from litellm.redis.stores.rate_limits.handle import HandleFactory, RateLimitsHandle
+from litellm.redis.stores.connection import RedisConnection, client_of
+from litellm.redis.stores.rate_limits.handle import HandleFactory
 from litellm.redis.stores.rate_limits.types import (
     AcquireReply,
     AtomicApplied,
@@ -18,12 +19,7 @@ from litellm.redis.stores.rate_limits.types import (
     GaugesAcquired,
     GuardedReply,
     LocalValue,
-    NativeAtomicCounter,
-    NativeCounter,
-    NativeEntry,
-    NativeIncrement,
     NativeOverLimit,
-    NativeScope,
     RateLimitCounter,
     RateLimitEntry,
     RateLimitGauge,
@@ -36,7 +32,7 @@ from litellm.redis.stores.rate_limits.types import (
     native_increment,
     native_scope,
 )
-from litellm.rust_bridge._native import NativeRateLimits, NativeRedisClient
+from litellm.rust_bridge._native import NativeRateLimits
 
 __all__ = [
     "AcquireReply",
@@ -49,20 +45,13 @@ __all__ = [
     "GaugeOverLimit",
     "GaugesAcquired",
     "GuardedReply",
-    "HandleFactory",
     "LocalValue",
-    "NativeAtomicCounter",
-    "NativeCounter",
-    "NativeEntry",
-    "NativeIncrement",
-    "NativeScope",
     "RateLimitCounter",
     "RateLimitEntry",
     "RateLimitGauge",
     "RateLimitScope",
     "RateLimitStore",
     "RateLimitWindow",
-    "RateLimitsHandle",
     "WindowCount",
 ]
 
@@ -121,13 +110,12 @@ class RateLimitStore:
 
     def __init__(
         self,
-        client: NativeRedisClient | None,
+        connection: RedisConnection | None,
         backfill_ttl: float | None = None,
-        redis_ttl: int = 60,
         *,
         handle: HandleFactory = NativeRateLimits,
     ) -> None:
-        self._handle: Final = handle(client, backfill_ttl, redis_ttl)
+        self._handle: Final = handle(client_of(connection), backfill_ttl)
 
     @property
     def has_redis(self) -> bool:

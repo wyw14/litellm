@@ -22,15 +22,14 @@ pub(crate) struct NativeAuthCache(Arc<AuthCache>);
 #[pymethods]
 impl NativeAuthCache {
     #[new]
-    #[pyo3(signature = (client, *, memory_entries = 200, memory_ttl_seconds = None, redis_ttl_seconds = 60))]
+    #[pyo3(signature = (client, *, memory_entries, memory_ttl_seconds = None))]
     fn new(
         client: Option<PyRef<'_, NativeRedisClient>>,
         memory_entries: usize,
         memory_ttl_seconds: Option<f64>,
-        redis_ttl_seconds: u64,
     ) -> Self {
         Self(Arc::new(AuthCache::new(
-            client.map(|client| remote(&client, redis_ttl_seconds)),
+            client.map(|client| remote(&client)),
             Settings {
                 memory_entries,
                 memory_ttl: ttl(memory_ttl_seconds),

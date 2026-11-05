@@ -8,6 +8,7 @@ from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass, field
 from typing import Final, Literal, TypeVar
 
+from litellm.redis.stores.connection import RedisConnection
 from litellm.redis.stores.spend_counters import SpendCounterStore, SpendIncrement
 from litellm.rust_bridge._native import NativeRedisClient, NativeRedisStoreError
 
@@ -76,14 +77,18 @@ class FakeSpendCounters:
     declared: list[DeclaredRead] = field(default_factory=list)
 
     def store(self) -> SpendCounterStore:
-        client: Final = None if self.redis is None else NativeRedisClient.connect({"host": "127.0.0.1", "port": 1})
-        return SpendCounterStore(client, redis_ttl=self.redis_ttl, handle=lambda _, __: self)
+        client: Final = (
+            None
+            if self.redis is None
+            else NativeRedisClient.connect({"host": "127.0.0.1", "port": 1}, default_ttl_seconds=self.redis_ttl)
+        )
+        return SpendCounterStore(None if client is None else RedisConnection(client), handle=lambda _: self)
 
-    def attach(self, client: NativeRedisClient, redis_ttl_seconds: int = 60, /) -> bool:
+    def attach(self, client: NativeRedisClient, /) -> bool:
         if self.redis is not None:
             return False
         self.redis = {}
-        self.redis_ttl = redis_ttl_seconds
+        self.redis_ttl = client.default_ttl_seconds
         return True
 
     def mget(self, counters: Sequence[str]) -> list[float | None] | None:

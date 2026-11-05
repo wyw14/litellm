@@ -11,11 +11,23 @@ use litellm_redis_client::{
     RedisEvents, RedisUrl, Target, Timeouts,
 };
 use litellm_redis_store::{
-    Number, Remote,
+    Number, Remote, TierPolicy,
     router_cooldowns::Cooldown,
     router_usage::{Counter, Kind},
 };
 use litellm_redis_testing::RedisDeployment;
+
+/// `DEFAULT_COOLDOWN_REDIS_READ_INTERVAL_SECONDS` and `DEFAULT_MAX_REDIS_BATCH_CACHE_SIZE`.
+pub const COOLDOWN_POLICY: TierPolicy = TierPolicy {
+    refresh_after: Duration::from_secs(1),
+    tracked_reads: 1000,
+};
+
+/// `DualCache`'s default `redis_batch_cache_expiry` and `DEFAULT_MAX_REDIS_BATCH_CACHE_SIZE`.
+pub const USAGE_POLICY: TierPolicy = TierPolicy {
+    refresh_after: Duration::from_secs(10),
+    tracked_reads: 1000,
+};
 
 pub fn connect(deployment: &RedisDeployment) -> RedisClient {
     connect_with(deployment, None, None)

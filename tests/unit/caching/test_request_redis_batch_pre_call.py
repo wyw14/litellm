@@ -294,9 +294,7 @@ async def test_the_admission_script_and_the_armed_cooldown_read_go_out_in_one_na
     limiter: Final = PROXY_MaxParallelRequestsHandler_v3(
         internal_usage_cache=InternalUsageCache(dual_cache=DualCache()), rate_limit_store=fakes.store()
     )
-    cooldowns: Final = RouterCooldownStore(
-        FakeRedisCache(FakeClient(_lua_ok_replies)), handle=lambda _c: _FakeCooldownsHandle()
-    )  # pyright: ignore[reportArgumentType]  # test double
+    cooldowns: Final = RouterCooldownStore(None, handle=lambda _c: _FakeCooldownsHandle())
     natives: Final = FakeNatives()
 
     with request_redis_batch_scope(native_factory=natives, native_send_factory=fake_send) as request:  # pyright: ignore[reportArgumentType]  # test double
@@ -852,9 +850,7 @@ async def test_identity_prefetch_is_one_read_after_which_hits_and_misses_alike_c
 @pytest.mark.asyncio
 async def test_the_auth_prefetch_and_the_armed_cooldown_read_go_out_in_one_native_pipeline():
     cache, _fake = shared_cache(FakeAuthCache(redis={"key-hit": {"k": "key-hit"}}))
-    cooldowns: Final = RouterCooldownStore(
-        FakeRedisCache(FakeClient(_lua_ok_replies)), handle=lambda _c: _FakeCooldownsHandle()
-    )  # pyright: ignore[reportArgumentType]  # test double
+    cooldowns: Final = RouterCooldownStore(None, handle=lambda _c: _FakeCooldownsHandle())
     natives: Final = FakeNatives()
 
     with request_redis_batch_scope(native_factory=natives, native_send_factory=fake_send) as request:  # pyright: ignore[reportArgumentType]  # test double
@@ -885,7 +881,9 @@ async def test_a_prefetch_served_from_memory_arms_no_early_cooldown_read():
 async def test_awaiting_a_native_read_runs_the_native_hooks_then_flushes_the_native_pre_batch_once_per_request():
     natives: Final = FakeNatives()
 
-    with request_redis_batch_scope(post_call_deadline=7, native_factory=natives, native_send_factory=fake_send) as request:  # pyright: ignore[reportArgumentType]  # test double
+    with request_redis_batch_scope(
+        post_call_deadline=7, native_factory=natives, native_send_factory=fake_send
+    ) as request:  # pyright: ignore[reportArgumentType]  # test double
         native: Final = request.native()
         request.add_pre_call_flush_hook(lambda: native.events.append("hook"))
         result: Final = request.native_result(FakeNativePending(native, lambda: "answer"))

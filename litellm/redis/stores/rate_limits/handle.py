@@ -26,12 +26,19 @@ class RateLimitsHandle(Protocol):
     def sliding_window(
         self, counters: Sequence[NativeCounter], now: int, window_size: int, send: NativeSend
     ) -> NativePending[list[tuple[str, int]]] | None: ...
-    def read_counters(self, counters: Sequence[NativeCounter], send: NativeSend) -> NativePending[list[str | None]] | None: ...
+    def read_counters(
+        self, counters: Sequence[NativeCounter], send: NativeSend
+    ) -> NativePending[list[str | None]] | None: ...
     def check_and_increment(
         self, counters: Sequence[NativeAtomicCounter], send: NativeSend
     ) -> NativePending[tuple[NativeOverLimit | None, list[tuple[int, int]]]] | None: ...
     def guarded_increment(
-        self, counter: NativeCounter, expected_window_start: str, amount: float, ttl_seconds: int | None, send: NativeSend
+        self,
+        counter: NativeCounter,
+        expected_window_start: str,
+        amount: float,
+        ttl_seconds: int | None,
+        send: NativeSend,
     ) -> NativePending[tuple[bool, int]] | None: ...
     def parallel_acquire(
         self, gauges: Sequence[tuple[NativeScope, int]], slot_ttl_seconds: int, slot_id: str, send: NativeSend
@@ -54,4 +61,4 @@ class RateLimitsHandle(Protocol):
     def increment_many_post_call(self, request: NativeRequestRedis, increments: Sequence[NativeIncrement]) -> None: ...
 
 
-HandleFactory: TypeAlias = Callable[[NativeRedisClient | None, float | None, int], RateLimitsHandle]
+HandleFactory: TypeAlias = Callable[[NativeRedisClient | None, float | None], RateLimitsHandle]

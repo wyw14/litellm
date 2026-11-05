@@ -19,7 +19,7 @@ from typing import TYPE_CHECKING, Any, Final
 
 import litellm
 from litellm._logging import print_verbose, verbose_logger
-from litellm.constants import DEFAULT_MAX_REDIS_BATCH_CACHE_SIZE
+from litellm.constants import DEFAULT_MAX_REDIS_BATCH_CACHE_SIZE, DEFAULT_REDIS_BATCH_CACHE_EXPIRY_SECONDS
 from litellm.types.caching import RedisPipelineIncrementOperation
 
 from .base_cache import BaseCache
@@ -91,7 +91,9 @@ class DualCache(BaseCache):
         self.last_redis_batch_access_time = LimitedSizeOrderedDict(max_size=default_max_redis_batch_cache_size)
         self._last_redis_batch_access_time_lock = Lock()
         self.redis_batch_cache_expiry = (
-            default_redis_batch_cache_expiry or litellm.default_redis_batch_cache_expiry or 10
+            default_redis_batch_cache_expiry
+            or litellm.default_redis_batch_cache_expiry
+            or DEFAULT_REDIS_BATCH_CACHE_EXPIRY_SECONDS
         )
         self.default_in_memory_ttl = default_in_memory_ttl or litellm.default_in_memory_ttl
         self.default_redis_ttl = default_redis_ttl or litellm.default_redis_ttl

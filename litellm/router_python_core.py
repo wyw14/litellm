@@ -242,7 +242,7 @@ from litellm.llms.openai_like.model_info import (
     get_openai_compatible_model_info,
 )
 from litellm.main import Chat as LitellmChat
-from litellm.redis.stores._connection import native_client
+from litellm.redis.stores.connection import connect
 from litellm.redis.stores.router_cooldowns import RouterCooldownStore
 from litellm.redis.stores.router_usage import RouterUsage, RouterUsageStore, UsageCounter
 from litellm.responses.bridge_check import keep_registered_mode
@@ -1784,8 +1784,8 @@ class PythonCore(DeprecatedRouterMembers):
         self._core_least_busy_reservations: InMemoryCache = InMemoryCache(
             max_size_in_memory=SELECTION_RESERVATION_MAX_KEYS
         )
-        redis_client: Final = native_client(None if redis_cache is None else redis_cache.native_settings)
-        self._core_usage_store: Final[RouterUsage] = RouterUsageStore(redis_client)
+        redis_connection: Final = connect(redis_cache)
+        self._core_usage_store: Final[RouterUsage] = RouterUsageStore(redis_connection)
         self._claude_code_session_router_cache: DualCache = DualCache(
             redis_cache=redis_cache,
             in_memory_cache=InMemoryCache(),
@@ -1891,7 +1891,7 @@ class PythonCore(DeprecatedRouterMembers):
         self.explicit_allowed_fails = allowed_fails
         self._core_cooldown_time = cooldown_time or DEFAULT_COOLDOWN_TIME_SECONDS
         self._core_cooldown_cache = CooldownCache(
-            store=RouterCooldownStore(redis_client), default_cooldown_time=self._core_cooldown_time
+            store=RouterCooldownStore(redis_connection), default_cooldown_time=self._core_cooldown_time
         )
         self._core_disable_cooldowns = disable_cooldowns
         self.fallback_on_unsupported_params = fallback_on_unsupported_params
@@ -2247,9 +2247,9 @@ class PythonCore(DeprecatedRouterMembers):
         and caching to just work.
         """
         self._core_cache.attach_redis_cache(cache)
-        redis_client: Final = native_client(cache.native_settings)
-        self._core_usage_store.attach_redis(redis_client)
-        self._core_cooldown_cache.cooldown_store.attach_redis(redis_client)
+        redis_connection: Final = connect(cache)
+        self._core_usage_store.attach_redis(redis_connection)
+        self._core_cooldown_cache.cooldown_store.attach_redis(redis_connection)
         self._claude_code_session_router_cache.attach_redis_cache(cache)
         self._core_prompt_caching_pin_cache.attach_redis_cache(cache)
 
@@ -10223,7 +10223,7 @@ class PythonCore(DeprecatedRouterMembers):
 
         current_minute: Final = get_utc_datetime().strftime("%H-%M")  # use the same timezone regardless of system clock
         await self._core_usage_store.increment_deployment(
-            deployment_id, deployment_name, current_minute, total_tokens, rpm_increment, parent_otel_span
+            deployment_id, deployment_name, current_minute, total_tokens, rpm_increment
         )
         return UsageCounter(deployment_id, deployment_name, current_minute, "tpm")
 
@@ -10460,7 +10460,6 @@ class PythonCore(DeprecatedRouterMembers):
             await self._core_usage_store.async_increment(
                 counter=counter,
                 value=1,
-                parent_otel_span=parent_otel_span,
                 ttl=RoutingArgs.ttl.value,
             )
 

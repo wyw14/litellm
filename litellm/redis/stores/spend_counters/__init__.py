@@ -6,7 +6,8 @@ from typing import Final
 from litellm._internal_context import with_service_target
 from litellm.caching.redis_batch import Batch
 from litellm.redis.stores._route import post_call_request, route
-from litellm.redis.stores.spend_counters.handle import HandleFactory, SpendCountersHandle
+from litellm.redis.stores.connection import RedisConnection, client_of
+from litellm.redis.stores.spend_counters.handle import HandleFactory
 from litellm.redis.stores.spend_counters.types import (
     END_USER_COUNTER_PREFIX,
     SPEND_COUNTER_PREFIX,
@@ -27,15 +28,13 @@ from litellm.redis.stores.spend_counters.types import (
     team_window_counter,
     user_counter,
 )
-from litellm.rust_bridge._native import NativeRedisClient, NativeSpendCounters
+from litellm.rust_bridge._native import NativeSpendCounters
 
 __all__ = [
     "END_USER_COUNTER_PREFIX",
     "SPEND_COUNTERS_TARGET",
     "SPEND_COUNTER_PREFIX",
-    "HandleFactory",
     "SpendCounterStore",
-    "SpendCountersHandle",
     "SpendIncrement",
     "SpendReading",
     "end_user_counter",
@@ -65,26 +64,25 @@ class SpendCounterStore:
     """The ``spend:*`` budget counters: Redis shared by every worker, and this worker's memory copy that answers
     only when Redis cannot. Counters are named by the builders above."""
 
-    def __init__(
-        self, client: NativeRedisClient | None, *, redis_ttl: int = 60, handle: HandleFactory = NativeSpendCounters
-    ) -> None:
-        self._handle: Final = handle(client, redis_ttl)
-        self._redis_ttl = None if client is None else redis_ttl
+    def __init__(self, connection: RedisConnection | None, *, handle: HandleFactory = NativeSpendCounters) -> None:
+        self._client = client_of(connection)
+        self._handle: Final = handle(self._client)
 
-    def attach_redis(self, client: NativeRedisClient | None, *, redis_ttl: int) -> None:
+    def attach_redis(self, connection: RedisConnection | None) -> None:
         """Adds the Redis tier once, keeping the memory copies, as ``DualCache.attach_redis_cache`` does."""
-        if client is None or not self._handle.attach(client, redis_ttl):
+        client: Final = client_of(connection)
+        if client is None or not self._handle.attach(client):
             return
-        self._redis_ttl = redis_ttl
+        self._client = client
 
     @property
-    def redis_ttl(self) -> int | None:
+    def redis_ttl(self) -> float | None:
         """The TTL every Redis write gives a counter, None when there is no Redis."""
-        return self._redis_ttl
+        return None if self._client is None else self._client.default_ttl_seconds
 
     @property
     def has_redis(self) -> bool:
-        return self._redis_ttl is not None
+        return self._client is not None
 
     @with_service_target(SPEND_COUNTERS_TARGET)
     async def read(self, counter: str) -> SpendReading:

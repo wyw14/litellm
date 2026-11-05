@@ -18,6 +18,7 @@ from litellm.proxy.common_utils.user_api_key_cache import (
     is_user_key_cache_key,
 )
 from litellm.proxy.proxy_server import UserAPIKeyCacheTTLEnum
+from litellm.redis.stores.auth_cache import AuthCacheStore
 from litellm.rust_bridge._native import NativeAuthCache
 from tests.unit.redis.stores.auth_cache_double import FakeAuthCache, shared_cache
 
@@ -160,8 +161,7 @@ class TestUserApiKeyCache:
     async def test_a_value_the_bridge_refuses_is_logged_not_raised(self):
         cache = UserApiKeyCache(
             redis_cache=MagicMock(spec=RedisCache),
-            auth_cache_handle=lambda _c, _s, _t: _refusing(),
-            redis_client=lambda _: None,
+            auth_cache=lambda _redis, settings: AuthCacheStore(None, settings, handle=lambda _c, _s: _refusing()),
         )
 
         await cache.async_set_cache("team_id:t1", {"team_id": "t1"})
@@ -171,8 +171,9 @@ class TestUserApiKeyCache:
     async def test_a_model_holding_a_datetime_is_cached_as_its_json_dump(self):
         cache = UserApiKeyCache(
             redis_cache=MagicMock(spec=RedisCache),
-            auth_cache_handle=lambda _c, _s, _t: NativeAuthCache(None),
-            redis_client=lambda _: None,
+            auth_cache=lambda _redis, settings: AuthCacheStore(
+                None, settings, handle=lambda _c, _s: NativeAuthCache(None)
+            ),
         )
         key_obj = UserAPIKeyAuth(token="abc", expires=datetime.datetime(2026, 1, 1, tzinfo=datetime.timezone.utc))
 
@@ -283,7 +284,7 @@ class TestUserKeyObjectPartition:
     @pytest.mark.asyncio
     async def test_attach_redis_cache_moves_both_partitions_onto_the_shared_store(self):
         fake = FakeAuthCache()
-        cache = UserApiKeyCache(auth_cache_handle=fake.factory, redis_client=lambda _: None)
+        cache = UserApiKeyCache(auth_cache=fake.store)
         cache.set_cache(end_user_cache_key("before"), {"user_id": "before"})
         assert not cache.has_redis
 

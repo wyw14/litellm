@@ -9,11 +9,11 @@ use litellm_redis_store::Send as RedisSend;
 use litellm_redis_store::{
     Number, Remote, RequestRedis,
     auth_cache::{self, AuthCache, Settings},
-    router_cooldowns::{self, RouterCooldowns},
+    router_cooldowns::RouterCooldowns,
 };
 use litellm_redis_testing::{RedisDeployment, Topology};
 use rstest::rstest;
-use support::{connect, connect_observed, remote, within};
+use support::{COOLDOWN_POLICY, connect, connect_observed, remote, within};
 use tokio::runtime::Handle;
 
 const LONG_DEADLINE: Duration = Duration::from_secs(60);
@@ -316,7 +316,7 @@ async fn pre_call_writes_and_reads_ride_one_pipeline_with_the_cooldown_read(
     let (client, trips) = connect_observed(&deployment);
     let cooldowns = std::sync::Arc::new(RouterCooldowns::new(
         Some(remote(client.clone())),
-        router_cooldowns::POLICY,
+        COOLDOWN_POLICY,
     ));
     let store = store(Some(client));
     let request = RequestRedis::new(Handle::current(), LONG_DEADLINE);

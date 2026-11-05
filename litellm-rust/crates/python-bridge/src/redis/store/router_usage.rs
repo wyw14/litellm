@@ -15,21 +15,15 @@ pub(crate) struct NativeRouterUsage(Arc<RouterUsage>);
 #[pymethods]
 impl NativeRouterUsage {
     #[new]
-    #[pyo3(signature = (client, redis_ttl_seconds = 60))]
-    fn new(
-        py: Python<'_>,
-        client: Option<PyRef<'_, NativeRedisClient>>,
-        redis_ttl_seconds: u64,
-    ) -> PyResult<Self> {
-        let remote = client.map(|client| remote(&client, redis_ttl_seconds));
+    fn new(py: Python<'_>, client: Option<PyRef<'_, NativeRedisClient>>) -> PyResult<Self> {
+        let remote = client.map(|client| remote(&client));
         let policy = router_tier_policies(py)?.usage;
         Ok(Self(Arc::new(RouterUsage::new(remote, policy))))
     }
 
     /// Adds the Redis tier and keeps memory; `false` when one was already attached.
-    #[pyo3(signature = (client, redis_ttl_seconds = 60))]
-    fn attach(&self, client: PyRef<'_, NativeRedisClient>, redis_ttl_seconds: u64) -> bool {
-        self.0.attach(remote(&client, redis_ttl_seconds))
+    fn attach(&self, client: PyRef<'_, NativeRedisClient>) -> bool {
+        self.0.attach(remote(&client))
     }
 
     fn increment<'py>(

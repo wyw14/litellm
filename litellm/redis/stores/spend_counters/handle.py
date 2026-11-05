@@ -9,7 +9,7 @@ from litellm.rust_bridge._native import NativeRedisClient, NativeRequestRedis, N
 
 
 class SpendCountersHandle(Protocol):
-    def attach(self, client: NativeRedisClient, redis_ttl_seconds: int = 60, /) -> bool: ...
+    def attach(self, client: NativeRedisClient, /) -> bool: ...
     def read(self, counter: str) -> Awaitable[tuple[Literal["redis", "memory"], float | None]]: ...
     def read_many(
         self, counters: Sequence[str], send: NativeSend
@@ -30,4 +30,4 @@ class SpendCountersHandle(Protocol):
     def snapshot(self) -> Mapping[str, float]: ...
 
 
-HandleFactory: TypeAlias = Callable[[NativeRedisClient | None, int], SpendCountersHandle]
+HandleFactory: TypeAlias = Callable[[NativeRedisClient | None], SpendCountersHandle]

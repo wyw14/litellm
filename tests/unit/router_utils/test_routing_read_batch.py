@@ -14,7 +14,7 @@ import litellm
 from litellm import Router
 from litellm.caching.redis_batch import request_redis_batch_scope
 from litellm.caching.redis_cache import RedisCache
-from litellm.redis.stores._connection import native_client
+from litellm.redis.stores.connection import connect
 from litellm.redis.stores.router_cooldowns import CooldownCacheValue, RouterCooldownStore
 from litellm.router_strategy.lowest_tpm_rpm_v2 import LowestTPMLoggingHandler_v2
 from litellm.router_utils import routing_prefetch
@@ -209,7 +209,7 @@ async def test_a_failed_batched_read_leaves_simple_shuffle_routing():
 
 def _armed_store() -> tuple[RouterCooldownStore, CooldownHandles]:
     handles: Final = CooldownHandles()
-    store: Final = RouterCooldownStore(native_client(RedisCache(host="redis.internal")), handle=handles)
+    store: Final = RouterCooldownStore(connect(RedisCache(host="redis.internal")), handle=handles)
     store.put("dep-a", {"exception_received": "429", "status_code": "429", "timestamp": 1.0, "cooldown_time": 60}, 60)
     return store, handles
 
@@ -266,7 +266,7 @@ async def test_a_failed_armed_cooldown_read_falls_back_to_the_stores_own_read():
         built.append(_UnreachableCooldowns(client))
         return built[-1]
 
-    store: Final = RouterCooldownStore(native_client(RedisCache(host="redis.internal")), handle=unreachable)
+    store: Final = RouterCooldownStore(connect(RedisCache(host="redis.internal")), handle=unreachable)
     store.put("dep-a", {"exception_received": "429", "status_code": "429", "timestamp": 1.0, "cooldown_time": 60}, 60)
 
     with request_redis_batch_scope(native_factory=FakeNatives(), native_send_factory=fake_send):  # pyright: ignore[reportArgumentType]  # test double

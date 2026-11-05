@@ -11,14 +11,13 @@ from typing import Final, Generic, TypeVar
 
 from pydantic import TypeAdapter
 
-from litellm.redis.stores.rate_limits import (
-    LocalValue,
+from litellm.redis.stores.rate_limits import LocalValue, RateLimitStore
+from litellm.redis.stores.rate_limits.types import (
     NativeAtomicCounter,
     NativeCounter,
     NativeEntry,
     NativeIncrement,
     NativeScope,
-    RateLimitStore,
 )
 from litellm.rust_bridge._native import NativeRateLimits
 
@@ -102,7 +101,7 @@ class FakeRateLimits:
     deferred: list[asyncio.Future[None]] = field(default_factory=list)
 
     def store(self) -> RateLimitStore:
-        return RateLimitStore(None, handle=lambda _client, _ttl, _redis_ttl: self)
+        return RateLimitStore(None, handle=lambda _client, _ttl: self)
 
     async def _run(
         self, script: RawScript | None, name: str, keys: Sequence[str], args: Sequence[object]
@@ -149,7 +148,9 @@ class FakeRateLimits:
 
         return Resolved(reply, send, "read_counters")
 
-    def check_and_increment(self, counters: Sequence[NativeAtomicCounter], send: object) -> Resolved[tuple[tuple[int, int, int] | None, list[tuple[int, int]]]]:
+    def check_and_increment(
+        self, counters: Sequence[NativeAtomicCounter], send: object
+    ) -> Resolved[tuple[tuple[int, int, int] | None, list[tuple[int, int]]]]:
         keys: Final = [key for counter, *_ in counters for key in (window_key(counter), counter_key(counter))]
         args: Final = [arg for _counter, *numbers in counters for arg in numbers]
 
@@ -209,9 +210,7 @@ class FakeRateLimits:
 
         return Resolved(reply, send, "parallel_release")
 
-    def parallel_count(
-        self, gauges: Sequence[NativeScope], slot_ttl_seconds: int, send: object
-    ) -> Resolved[list[int]]:
+    def parallel_count(self, gauges: Sequence[NativeScope], slot_ttl_seconds: int, send: object) -> Resolved[list[int]]:
         keys: Final = [scope_key(scope, "max_parallel_requests") for scope in gauges]
 
         async def reply() -> list[int]:

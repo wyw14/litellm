@@ -51,7 +51,8 @@ from litellm.proxy.hooks.parallel_request_limiter_v3 import (
     PROXY_MaxParallelRequestsHandler_v3 as RateLimitHandler,
 )
 from litellm.proxy.utils import InternalUsageCache, hash_token
-from litellm.redis.stores.rate_limits import AtomicCounter, CounterIncrement, NativeIncrement, RateLimitScope
+from litellm.redis.stores.rate_limits import AtomicCounter, CounterIncrement, RateLimitScope
+from litellm.redis.stores.rate_limits.types import NativeIncrement
 from litellm.types.llms.openai import (
     InputTokensDetails,
     ResponseAPIUsage,

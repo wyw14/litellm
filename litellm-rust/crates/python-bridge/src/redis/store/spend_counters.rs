@@ -36,17 +36,15 @@ pub(crate) struct NativeSpendCounters(Arc<SpendCounters>);
 #[pymethods]
 impl NativeSpendCounters {
     #[new]
-    #[pyo3(signature = (client, redis_ttl_seconds = 60))]
-    fn new(client: Option<PyRef<'_, NativeRedisClient>>, redis_ttl_seconds: u64) -> Self {
+    fn new(client: Option<PyRef<'_, NativeRedisClient>>) -> Self {
         Self(Arc::new(SpendCounters::new(
-            client.map(|client| remote(&client, redis_ttl_seconds)),
+            client.map(|client| remote(&client)),
         )))
     }
 
     /// Adds the Redis tier and keeps memory; `false` when one was already attached.
-    #[pyo3(signature = (client, redis_ttl_seconds = 60))]
-    fn attach(&self, client: PyRef<'_, NativeRedisClient>, redis_ttl_seconds: u64) -> bool {
-        self.0.attach(remote(&client, redis_ttl_seconds))
+    fn attach(&self, client: PyRef<'_, NativeRedisClient>) -> bool {
+        self.0.attach(remote(&client))
     }
 
     /// `("redis" | "memory", value)`: where the answer came from, a Redis miss included.

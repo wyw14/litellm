@@ -1,37 +1,33 @@
 from __future__ import annotations
 
 from collections.abc import Awaitable, Mapping, Sequence
-from typing import TYPE_CHECKING, Final, Protocol
-
-if TYPE_CHECKING:
-    from opentelemetry.trace import Span
+from typing import Final, Protocol
 
 from litellm._internal_context import with_service_target
 from litellm.caching.redis_batch import Batch
 from litellm.redis.stores._route import route
-from litellm.redis.stores.router_cooldowns.handle import HandleFactory, RouterCooldownsHandle
+from litellm.redis.stores.connection import RedisConnection, client_of
+from litellm.redis.stores.router_cooldowns.handle import HandleFactory
 from litellm.redis.stores.router_cooldowns.types import ROUTER_COOLDOWNS_TARGET, ActiveCooldowns, CooldownCacheValue
-from litellm.rust_bridge._native import NativeRedisClient, NativeRouterCooldowns
+from litellm.rust_bridge._native import NativeRouterCooldowns
 
 __all__ = [
     "ROUTER_COOLDOWNS_TARGET",
     "ActiveCooldowns",
     "CooldownCacheValue",
-    "HandleFactory",
     "RouterCooldownStore",
     "RouterCooldowns",
-    "RouterCooldownsHandle",
 ]
 
 
 class RouterCooldowns(Protocol):
-    def attach_redis(self, client: NativeRedisClient | None) -> None: ...
+    def attach_redis(self, connection: RedisConnection | None) -> None: ...
     def flush_local_counters(self) -> None: ...
     def put(self, model_id: str, value: CooldownCacheValue, ttl: float) -> None: ...
     def increment_allowed_fails(self, model_id: str, suffix: str | None, ttl: float) -> int: ...
     def active(self, model_ids: Sequence[str], *, batch: Batch) -> Awaitable[ActiveCooldowns]: ...
-    def active_sync(self, model_ids: Sequence[str], parent_otel_span: Span | None) -> ActiveCooldowns: ...
-    def minimum(self, model_ids: Sequence[str], default: float, parent_otel_span: Span | None) -> float: ...
+    def active_sync(self, model_ids: Sequence[str]) -> ActiveCooldowns: ...
+    def minimum(self, model_ids: Sequence[str], default: float) -> float: ...
     def evict_local(self, model_id: str) -> None: ...
     def snapshot(self) -> Mapping[str, CooldownCacheValue]: ...
 
@@ -41,11 +37,12 @@ async def _tuple(pending: Awaitable[ActiveCooldowns]) -> ActiveCooldowns:
 
 
 class RouterCooldownStore:
-    def __init__(self, client: NativeRedisClient | None, *, handle: HandleFactory = NativeRouterCooldowns) -> None:
-        self._handle: Final = handle(client)
+    def __init__(self, connection: RedisConnection | None, *, handle: HandleFactory = NativeRouterCooldowns) -> None:
+        self._handle: Final = handle(client_of(connection))
 
-    def attach_redis(self, client: NativeRedisClient | None) -> None:
+    def attach_redis(self, connection: RedisConnection | None) -> None:
         """Adds the Redis tier once, keeping this router's memory, as ``DualCache.attach_redis_cache`` does."""
+        client: Final = client_of(connection)
         if client is not None:
             self._handle.attach(client)
 
@@ -67,11 +64,11 @@ class RouterCooldownStore:
         return _tuple(target.result(self._handle.active(model_ids, target.send)))
 
     @with_service_target(ROUTER_COOLDOWNS_TARGET)
-    def active_sync(self, model_ids: Sequence[str], parent_otel_span: Span | None) -> ActiveCooldowns:
+    def active_sync(self, model_ids: Sequence[str]) -> ActiveCooldowns:
         return tuple(self._handle.active_sync(model_ids))
 
     @with_service_target(ROUTER_COOLDOWNS_TARGET)
-    def minimum(self, model_ids: Sequence[str], default: float, parent_otel_span: Span | None) -> float:
+    def minimum(self, model_ids: Sequence[str], default: float) -> float:
         return self._handle.minimum(model_ids) or default
 
     def evict_local(self, model_id: str) -> None:

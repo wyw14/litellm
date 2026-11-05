@@ -90,7 +90,7 @@ from litellm.proxy.spend_tracking.input_tokens import (
     models_counted_for,
     openai_chat_pdf_file_tokens,
 )
-from litellm.redis.stores._connection import native_client
+from litellm.redis.stores.connection import connect
 from litellm.redis.stores.rate_limits import (
     AtomicApplied,
     AtomicCounter,
@@ -685,12 +685,9 @@ class _PROXY_MaxParallelRequestsHandler_v3(CustomLogger):
         self._ptu_team_ceiling_resolver = ptu_team_ceiling_resolver
         self._fail_closed_resolver = fail_closed_resolver
         self._force_hash_tag_grouping_resolver = force_hash_tag_grouping_resolver
-        redis_cache: Final = internal_usage_cache.dual_cache.redis_cache
-        native_settings: Final = None if redis_cache is None else redis_cache.native_settings
         self.rate_limits: Final = rate_limit_store or RateLimitStore(
-            native_client(native_settings),
+            connect(internal_usage_cache.dual_cache.redis_cache),
             internal_usage_cache.dual_cache.default_in_memory_ttl,
-            60 if native_settings is None else native_settings.default_ttl,
         )
 
         self.window_size = int(os.getenv("LITELLM_RATE_LIMIT_WINDOW_SIZE", 60))

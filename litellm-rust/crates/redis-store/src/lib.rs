@@ -8,6 +8,7 @@ mod remote;
 mod request;
 pub mod router_cooldowns;
 pub mod router_usage;
+pub mod sensitive_route_pins;
 pub mod spend_counters;
 mod tier;
 mod value;

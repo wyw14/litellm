@@ -47,9 +47,9 @@ class CooldownCache:
         return list(await self.cooldown_store.active(model_ids, batch=Batch.NONE))
 
     def get_min_cooldown(self, model_ids: Sequence[str], parent_otel_span: Span | None) -> float:
-        return self.cooldown_store.minimum(model_ids, self.default_cooldown_time, parent_otel_span)
+        return self.cooldown_store.minimum(model_ids, self.default_cooldown_time)
 
     def get_active_cooldowns(
         self, model_ids: Sequence[str], parent_otel_span: Span | None
     ) -> list[tuple[str, CooldownCacheValue]]:
-        return list(self.cooldown_store.active_sync(model_ids, parent_otel_span))
+        return list(self.cooldown_store.active_sync(model_ids))

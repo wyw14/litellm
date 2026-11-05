@@ -6,6 +6,7 @@ import pytest
 from litellm._internal_context import current_service_target
 from litellm.caching.redis_batch import Batch, request_redis_batch_scope
 from litellm.caching.redis_cache import RedisCache
+from litellm.redis.stores.connection import RedisConnection
 from litellm.redis.stores.spend_counters import (
     SPEND_COUNTERS_TARGET,
     SpendCounterStore,
@@ -123,14 +124,20 @@ def test_only_a_timeout_or_an_open_breaker_lets_a_post_call_increment_drop(kind:
     assert not is_unavailable(TimeoutError(kind))
 
 
+def _connection(host: str, *, ttl: int) -> RedisConnection:
+    client: Final = NativeRedisClient.connect({"host": host, "port": 1}, default_ttl_seconds=ttl)
+    assert client is not None
+    return RedisConnection(client)
+
+
 def test_redis_attaches_once_keeping_memory_and_its_ttl_is_the_lease_the_store_reports() -> None:
     store: Final = SpendCounterStore(None)
     store.set_local(team_counter("team-a"), 4.5)
 
-    store.attach_redis(None, redis_ttl=10)
+    store.attach_redis(None)
     assert not store.has_redis
-    store.attach_redis(NativeRedisClient.connect({"host": "127.0.0.1", "port": 1}), redis_ttl=30)
-    store.attach_redis(NativeRedisClient.connect({"host": "127.0.0.2", "port": 1}), redis_ttl=90)
+    store.attach_redis(_connection("127.0.0.1", ttl=30))
+    store.attach_redis(_connection("127.0.0.2", ttl=90))
 
     assert store.has_redis
     assert store.redis_ttl == 30
@@ -163,7 +170,7 @@ async def test_post_call_increments_go_on_the_requests_native_post_call_batch_un
 @pytest.mark.asyncio
 async def test_an_unreachable_redis_fails_writes_as_transport_and_serves_reads_from_memory() -> None:
     store: Final = NativeSpendCounters(
-        NativeRedisClient.connect({"host": "127.0.0.1", "port": 1, "socket_timeout": 0.2})
+        NativeRedisClient.connect({"host": "127.0.0.1", "port": 1, "socket_timeout": 0.2}, default_ttl_seconds=60)
     )
     store.set_local("spend:key:k", 4.0)
 

@@ -6,11 +6,11 @@ use litellm_redis_client::commands;
 use litellm_redis_client::{Amount, Expiry, Operation, Ttl};
 use litellm_redis_store::{
     Number,
-    router_usage::{COUNTER_TTL, Counter, Kind, POLICY, RouterUsage},
+    router_usage::{COUNTER_TTL, Counter, Kind, RouterUsage},
 };
 use litellm_redis_testing::{RedisDeployment, Topology};
 use rstest::rstest;
-use support::{connect, remote, usage, within};
+use support::{USAGE_POLICY as POLICY, connect, remote, usage, within};
 
 fn tpm_and_rpm(model: Option<&str>) -> [Counter; 2] {
     [Kind::Tpm, Kind::Rpm].map(|kind| Counter {

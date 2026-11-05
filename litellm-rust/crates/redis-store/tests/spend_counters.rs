@@ -7,12 +7,12 @@ use litellm_redis_client::{Operation, RedisClient, Ttl};
 use litellm_redis_store::Send as RedisSend;
 use litellm_redis_store::{
     Number, RequestRedis,
-    router_cooldowns::{self, RouterCooldowns},
+    router_cooldowns::RouterCooldowns,
     spend_counters::{LostSeed, Reading, SpendCounter, SpendCounters},
 };
 use litellm_redis_testing::{RedisDeployment, Topology};
 use rstest::rstest;
-use support::{connect, connect_observed, remote, within};
+use support::{COOLDOWN_POLICY, connect, connect_observed, remote, within};
 use tokio::runtime::Handle;
 
 const TTL: Duration = Duration::from_secs(60);
@@ -369,7 +369,7 @@ async fn the_budget_read_rides_the_same_pre_call_pipeline_as_the_cooldown_read(
     let (client, trips) = connect_observed(&deployment);
     let cooldowns = std::sync::Arc::new(RouterCooldowns::new(
         Some(remote(client.clone())),
-        router_cooldowns::POLICY,
+        COOLDOWN_POLICY,
     ));
     let spend = store(Some(client));
     let request = RequestRedis::new(Handle::current(), LONG_DEADLINE);

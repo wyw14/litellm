@@ -49,6 +49,8 @@ mod _native {
     #[pymodule_export]
     use crate::redis::store::router_usage::NativeRouterUsage;
     #[pymodule_export]
+    use crate::redis::store::sensitive_route_pins::NativeSensitiveRoutePins;
+    #[pymodule_export]
     use crate::redis::store::spend_counters::NativeSpendCounters;
     #[pymodule_export]
     use crate::redis::store::{
@@ -135,6 +137,7 @@ mod tests {
                 "NativePending",
                 "NativeRouterCooldowns",
                 "NativeRouterUsage",
+                "NativeSensitiveRoutePins",
                 "NativeRedisStoreError",
                 "NativeSpendCounters",
                 "native_redis_breaker_states",

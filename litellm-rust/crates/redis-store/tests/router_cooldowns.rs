@@ -7,11 +7,11 @@ use litellm_redis_client::{Operation, Ttl};
 use litellm_redis_store::Send as RedisSend;
 use litellm_redis_store::{
     Number, RequestRedis,
-    router_cooldowns::{Cooldown, POLICY, RouterCooldowns},
+    router_cooldowns::{Cooldown, RouterCooldowns},
 };
 use litellm_redis_testing::{RedisDeployment, Topology};
 use rstest::rstest;
-use support::{ALLOWED_FAILS, connect, cooldowns, remote, within};
+use support::{ALLOWED_FAILS, COOLDOWN_POLICY as POLICY, connect, cooldowns, remote, within};
 use tokio::runtime::Handle;
 
 async fn read_active(

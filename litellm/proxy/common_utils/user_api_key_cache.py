@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 import re
 from collections.abc import Awaitable, Callable, Mapping, Sequence
-from typing import TYPE_CHECKING, Any, Final, TypeVar, cast, overload
+from typing import TYPE_CHECKING, Any, Final, TypeAlias, TypeVar, cast, overload
 
 from pydantic import BaseModel, TypeAdapter
 
@@ -13,10 +13,8 @@ from litellm.caching.in_memory_cache import InMemoryCache
 from litellm.caching.redis_cache import RedisCache
 from litellm.constants import DEFAULT_MANAGEMENT_OBJECT_IN_MEMORY_CACHE_TTL
 from litellm.proxy.common_utils.cache_pydantic_utils import CacheCodec, CacheValue
-from litellm.redis.native_settings import NativeRedisSettings
-from litellm.redis.stores._connection import native_client
-from litellm.redis.stores.auth_cache import AuthCacheSettings, AuthCacheStore, HandleFactory, native_handle
-from litellm.rust_bridge._native import NativeRedisClient
+from litellm.redis.stores.auth_cache import AuthCacheSettings, AuthCacheStore
+from litellm.redis.stores.connection import connect
 
 if TYPE_CHECKING:
     from opentelemetry.trace import Span
@@ -27,6 +25,12 @@ from litellm.constants import AUTH_OBJECTS_TARGET as AUTH_OBJECTS_TARGET  # noqa
 
 _HASHED_TOKEN_CACHE_KEY: Final = re.compile(r"[0-9a-f]{64}")
 _BUDGET_WINDOWS_ABSENT_PREFIX: Final = "budget_windows_absent:"
+
+AuthCacheFactory: TypeAlias = Callable[[RedisCache, AuthCacheSettings], AuthCacheStore]
+
+
+def _connected_auth_cache(redis_cache: RedisCache, settings: AuthCacheSettings) -> AuthCacheStore:
+    return AuthCacheStore(connect(redis_cache), settings)
 
 
 def is_user_key_cache_key(key: str) -> bool:
@@ -79,8 +83,7 @@ class UserApiKeyCache(DualCache):
         default_redis_ttl: float | None = None,
         key_object_in_memory_cache: InMemoryCache | None = None,
         budget_windows_absent_in_memory_cache: InMemoryCache | None = None,
-        auth_cache_handle: HandleFactory = native_handle,
-        redis_client: Callable[[NativeRedisSettings], NativeRedisClient | None] = native_client,
+        auth_cache: AuthCacheFactory = _connected_auth_cache,
     ) -> None:
         super().__init__(
             in_memory_cache=in_memory_cache,
@@ -97,15 +100,14 @@ class UserApiKeyCache(DualCache):
             or InMemoryCache(default_ttl=DEFAULT_MANAGEMENT_OBJECT_IN_MEMORY_CACHE_TTL),
             default_in_memory_ttl=default_in_memory_ttl,
         )
-        self._auth_cache_handle: Final = auth_cache_handle
-        self._redis_client: Final = redis_client
+        self._auth_cache: Final = auth_cache
         self._redis_connection: RedisCache | None = None
         self._shared: AuthCacheStore | None = None
         self.attach_redis_cache(redis_cache, default_redis_ttl=default_redis_ttl)
 
     @property
     def shared(self) -> AuthCacheStore | None:
-        """The native store holding the keyspace once ``enable_redis_auth_cache`` attached Redis."""
+        """The shared store holding the keyspace once ``enable_redis_auth_cache`` attached Redis."""
         return self._shared
 
     @property
@@ -152,15 +154,7 @@ class UserApiKeyCache(DualCache):
         if default_redis_ttl is not None:
             self.update_cache_ttl(default_in_memory_ttl=None, default_redis_ttl=default_redis_ttl)
         self._redis_connection = redis_cache
-        native_settings: Final = redis_cache.native_settings
-        if native_settings is None:
-            return
-        self._shared = AuthCacheStore(
-            self._redis_client(native_settings),
-            self._settings(),
-            redis_ttl=native_settings.default_ttl,
-            handle=self._auth_cache_handle,
-        )
+        self._shared = self._auth_cache(redis_cache, self._settings())
 
     def get_local(self, key: str) -> object:
         """This worker's memory copy alone."""
