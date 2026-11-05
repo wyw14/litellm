@@ -16,7 +16,7 @@ import traceback
 from collections.abc import Generator, Mapping
 from contextlib import contextmanager
 from enum import Enum
-from typing import Any, Final, Literal, cast
+from typing import TYPE_CHECKING, Any, Final, Literal, cast
 
 from pydantic import BaseModel, ConfigDict, TypeAdapter
 
@@ -44,23 +44,29 @@ from .redis_cluster_cache import RedisClusterCache
 from .redis_semantic_cache import RedisSemanticCache
 from .s3_cache import S3Cache
 
+if TYPE_CHECKING:
+    from litellm.caching.cache_key_diff import CacheKeyDiff
+
 RESPONSE_CACHE_TARGET: Final = "llm_response"
 _ALWAYS_KEYED_PROVIDER_PARAMS: Final = frozenset({"continuation_token", "return_token_ids"})
+_SEMANTIC_CACHE_TENANT_SCOPE_PART_NAME: Final = "semantic_cache_tenant_scope"
 _DECODED_LITERAL: Final = TypeAdapter(object)
 _REDIS_STARTUP_NODES_ADAPTER: Final = TypeAdapter(
     list[dict[str, object]], config=ConfigDict(strict=True, hide_input_in_errors=True)
 )
 
 
-def _keyed_provider_params_in_extra_body(kwargs: Mapping[str, object]) -> str:
+def _keyed_provider_params_in_extra_body_parts(
+    kwargs: Mapping[str, object],
+) -> tuple[tuple[str, str], ...]:
     raw_extra_body: Final = kwargs.get("extra_body")
     if not isinstance(raw_extra_body, dict):
-        return ""
+        return ()
     extra_body: Final = cast(  # cast-ok: isinstance leaves the key and value types unknown
         Mapping[str, object], raw_extra_body
     )
-    return "".join(
-        f"extra_body.{param}: {extra_body[param]}"
+    return tuple(
+        (f"extra_body.{param}", f"extra_body.{param}: {extra_body[param]}")
         for param in sorted(_ALWAYS_KEYED_PROVIDER_PARAMS)
         if extra_body.get(param)
     )
@@ -385,10 +391,12 @@ class Cache:
             return (*self._SEMANTIC_CACHE_TENANT_SCOPE_FIELDS, self._SEMANTIC_CACHE_END_USER_SCOPE_FIELD)
         return self._SEMANTIC_CACHE_TENANT_SCOPE_FIELDS
 
-    def _get_semantic_cache_tenant_scope(self, kwargs: dict) -> str:
-        litellm_params: Final[dict] = kwargs.get("litellm_params") or {}
-        metadata_sources: Final[tuple[dict, ...]] = tuple(
-            source.get(key) or {} for source in (kwargs, litellm_params) for key in ("metadata", "litellm_metadata")
+    def _get_semantic_cache_tenant_scope(self, kwargs: Mapping[str, object]) -> str:
+        litellm_params: Final = cast(Mapping[str, object], kwargs.get("litellm_params") or {})
+        metadata_sources: Final = tuple(
+            cast(dict[str, object], source.get(key) or {})
+            for source in (kwargs, litellm_params)
+            for key in ("metadata", "litellm_metadata")
         )
         scope_values: Final = (
             (field, next((source[field] for source in metadata_sources if source.get(field) is not None), None))
@@ -406,48 +414,15 @@ class Cache:
         Returns:
             str: The cache key generated from the arguments, or None if no cache key could be generated.
         """
-        cache_key = ""
         # verbose_logger.debug("\nGetting Cache key. Kwargs: %s", kwargs)
-
-        preset_cache_key: Final = self.get_preset_cache_key_from_kwargs(**kwargs)
-        if preset_cache_key is not None:
+        key_parts: Final = self.get_cache_key_parts(kwargs)
+        if len(key_parts) == 1 and key_parts[0][0] == "preset_cache_key":
+            preset_cache_key: Final = key_parts[0][1]
             verbose_logger.debug("\nReturning preset cache key: %s", preset_cache_key)
             return preset_cache_key
 
-        combined_kwargs: Final = ModelParamHelper.get_all_llm_api_params()
-        is_semantic_cache: Final = self._is_semantic_cache()
-        scope_excluded_params: Final = self._SEMANTIC_CACHE_SCOPE_EXCLUDED_PARAMS if is_semantic_cache else frozenset()
-        for param in kwargs:
-            if param in scope_excluded_params:
-                continue
-            if param in combined_kwargs or param in _ALWAYS_KEYED_PROVIDER_PARAMS:
-                param_value: str | None = self._get_param_value(param, kwargs)
-                if param in _ALWAYS_KEYED_PROVIDER_PARAMS and not param_value:
-                    continue
-                if param_value is not None:
-                    cache_key += f"{param}: {param_value}"
-            elif not is_litellm_owned_kwarg(param):
-                if litellm.enable_caching_on_provider_specific_optional_params is True:  # feature flagged for now
-                    if kwargs[param] is None:
-                        continue  # ignore None params
-                    cache_key += f"{param}: {kwargs[param]}"
-
-        if is_semantic_cache:
-            cache_key += self._get_semantic_cache_tenant_scope(kwargs)
-
-        reasoning_summary: Final = peek_reasoning_summary_aliases(kwargs)
-        reasoning_summary_material: Final = (
-            "" if reasoning_summary is None else f"reasoning_summary: {reasoning_summary}"
-        )
-        tool_call_id_shape_material: Final = (
-            "" if embeds_thought_signature_in_tool_call_id(kwargs) else "thought_signature_in_tool_call_id: False"
-        )
-        hashed_cache_key = Cache._get_hashed_cache_key(
-            cache_key
-            + _keyed_provider_params_in_extra_body(kwargs)
-            + reasoning_summary_material
-            + tool_call_id_shape_material
-        )
+        cache_key: Final = "".join(material for _, material in key_parts)
+        hashed_cache_key = Cache._get_hashed_cache_key(cache_key)
         hashed_cache_key = self._add_namespace_to_cache_key(hashed_cache_key, **kwargs)
         verbose_logger.debug(
             "\nCreated cache key: %s (source material length: %d)",
@@ -460,11 +435,56 @@ class Cache:
         self._set_preset_cache_key_in_kwargs(preset_cache_key=hashed_cache_key, **kwargs_for_preset)
         return hashed_cache_key
 
+    def get_cache_key_parts(self, kwargs: Mapping[str, object]) -> tuple[tuple[str, str], ...]:
+        """
+        Ordered ``(field name, key material)`` pairs that make up the cache key.
+
+        Joining the materials reproduces the string hashed into the pre-namespace
+        cache key. Kept separate from get_cache_key so callers can explain which
+        request fields drive a key without hashing or touching the cache backend.
+        """
+        preset_cache_key: Final = self.get_preset_cache_key_from_kwargs(**kwargs)
+        if preset_cache_key is not None:
+            return (("preset_cache_key", preset_cache_key),)
+
+        key_parts: list[tuple[str, str]] = []
+        combined_kwargs: Final = ModelParamHelper.get_all_llm_api_params()
+        is_semantic_cache: Final = self._is_semantic_cache()
+        scope_excluded_params: Final = self._SEMANTIC_CACHE_SCOPE_EXCLUDED_PARAMS if is_semantic_cache else frozenset()
+        for param in kwargs:
+            if param in scope_excluded_params:
+                continue
+            if param in combined_kwargs or param in _ALWAYS_KEYED_PROVIDER_PARAMS:
+                param_value: object = self._get_param_value(param, kwargs)
+                if param in _ALWAYS_KEYED_PROVIDER_PARAMS and not param_value:
+                    continue
+                if param_value is not None:
+                    key_parts.append((param, f"{param}: {param_value}"))
+            elif not is_litellm_owned_kwarg(param):
+                if litellm.enable_caching_on_provider_specific_optional_params is True:  # feature flagged for now
+                    if kwargs[param] is None:
+                        continue  # ignore None params
+                    key_parts.append((param, f"{param}: {kwargs[param]}"))
+
+        if is_semantic_cache:
+            tenant_scope_material: Final = self._get_semantic_cache_tenant_scope(kwargs)
+            if tenant_scope_material:
+                key_parts.append((_SEMANTIC_CACHE_TENANT_SCOPE_PART_NAME, tenant_scope_material))
+
+        key_parts.extend(_keyed_provider_params_in_extra_body_parts(kwargs))
+
+        reasoning_summary: Final = peek_reasoning_summary_aliases(kwargs)
+        if reasoning_summary is not None:
+            key_parts.append(("reasoning_summary", f"reasoning_summary: {reasoning_summary}"))
+        if not embeds_thought_signature_in_tool_call_id(kwargs):
+            key_parts.append(("thought_signature_in_tool_call_id", "thought_signature_in_tool_call_id: False"))
+        return tuple(key_parts)
+
     def _get_param_value(
         self,
         param: str,
-        kwargs: dict,
-    ) -> str | None:
+        kwargs: Mapping[str, object],
+    ) -> object:
         """
         Get the value for the given param from kwargs
         """
@@ -474,7 +494,7 @@ class Cache:
             return self._get_file_param_value(kwargs)
         return kwargs[param]
 
-    def _get_model_param_value(self, kwargs: dict) -> str:
+    def _get_model_param_value(self, kwargs: Mapping[str, object]) -> str:
         """
         Handles getting the value for the 'model' param from kwargs
 
@@ -482,7 +502,9 @@ class Cache:
         2. Else if a model_group is set, then return the model_group as the model. This is used for all requests sent through the litellm.Router()
         3. Else use the `model` passed in kwargs, plus `model_id` when set (e.g. a SageMaker inference component)
         """
-        litellm_params: Final[dict] = kwargs.get("litellm_params", {}) or {}
+        litellm_params: Final = cast(  # cast-ok: untyped request litellm_params dict or empty
+            Mapping[str, object], kwargs.get("litellm_params") or {}
+        )
         metadata_sources: Final = cast(  # cast-ok: each source is the untyped request's metadata dict or empty
             "tuple[dict[str, object], dict[str, object], dict[str, object], dict[str, object]]",
             (
@@ -524,18 +546,19 @@ class Cache:
                     return str(group)
         return None
 
-    def _get_file_param_value(self, kwargs: dict) -> str:
+    def _get_file_param_value(self, kwargs: Mapping[str, object]) -> str | None:
         """
         Handles getting the value for the 'file' param from kwargs. Used for `transcription` requests
         """
         file: Final = kwargs.get("file")
-        metadata: Final = kwargs.get("metadata", {})
-        litellm_params: Final = kwargs.get("litellm_params", {})
-        return (
+        metadata: Final = cast(Mapping[str, object], kwargs.get("metadata") or {})
+        litellm_params: Final = cast(Mapping[str, object], kwargs.get("litellm_params") or {})
+        return cast(  # cast-ok: file identifiers are untyped request values rendered into the key material
+            "str | None",
             metadata.get("file_checksum")
             or getattr(file, "name", None)
             or metadata.get("file_name")
-            or litellm_params.get("file_name")
+            or litellm_params.get("file_name"),
         )
 
     def get_preset_cache_key_from_kwargs(self, **kwargs: object) -> str | None:
@@ -589,6 +612,21 @@ class Cache:
         verbose_logger.debug("Hashed cache key (SHA-256): %s", hash_hex)
         return hash_hex
 
+    def resolve_cache_namespace(self, kwargs: Mapping[str, object]) -> str | None:
+        """
+        Namespace prefixed onto the cache key, from the per-request cache
+        control, request metadata, or the cache-level default in that order.
+        """
+        dynamic_cache_control: Final = cast(  # cast-ok: untyped per-request cache control dict
+            Mapping[str, object], kwargs.get("cache") or {}
+        )
+        metadata: Final = cast(Mapping[str, object], kwargs.get("metadata") or {})  # cast-ok: untyped request metadata
+        namespace: Final = cast(  # cast-ok: namespace sources are untyped request values
+            "str | None",
+            dynamic_cache_control.get("namespace") or metadata.get("redis_namespace") or self.namespace,
+        )
+        return namespace or None
+
     def _add_namespace_to_cache_key(self, hash_hex: str, **kwargs) -> str:
         """
         If a redis namespace is provided, add it to the cache key
@@ -600,13 +638,28 @@ class Cache:
         Returns:
             str: The final hashed cache key with the redis namespace.
         """
-        dynamic_cache_control: Final[DynamicCacheControl] = kwargs.get("cache", {})
-        metadata: Final = kwargs.get("metadata") or {}
-        namespace: Final = dynamic_cache_control.get("namespace") or metadata.get("redis_namespace") or self.namespace
+        namespace: Final = self.resolve_cache_namespace(kwargs)
         if namespace:
             hash_hex = f"{namespace}:{hash_hex}"
         verbose_logger.debug("Final hashed key: %s", hash_hex)
         return hash_hex
+
+    def explain_cache_key_diff(
+        self,
+        first_request: Mapping[str, object],
+        second_request: Mapping[str, object],
+    ) -> "CacheKeyDiff":
+        """
+        Compare which keyed fields differ between two local requests and whether
+        they produce the same final cache key.
+
+        Never reads or writes a cache backend. The returned report carries only
+        field names and comparison flags, never request values such as prompts
+        or credentials.
+        """
+        from litellm.caching.cache_key_diff import explain_cache_key_diff
+
+        return explain_cache_key_diff(self, first_request, second_request)
 
     def generate_streaming_content(self, content):
         chunk_size: Final = 5  # Adjust the chunk size as needed
