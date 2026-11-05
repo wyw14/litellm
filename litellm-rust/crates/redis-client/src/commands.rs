@@ -93,7 +93,10 @@ impl Plan {
             Self::Commands(commands) => commands.clone(),
             Self::Script(call) => vec![call.script.evalsha(&call.keys, &call.args)],
             Self::KeepingTtl {
-                increment, key, ttl, ..
+                increment,
+                key,
+                ttl,
+                ..
             } => vec![increment.clone(), expire_cmd(key, *ttl)],
         }
     }

@@ -2,8 +2,8 @@ mod support;
 
 use std::time::Duration;
 
-use litellm_redis_client::{Operation, Ttl};
 use litellm_redis_client::commands;
+use litellm_redis_client::{Operation, Ttl};
 use litellm_redis_store::Send as RedisSend;
 use litellm_redis_store::{
     Number, RequestRedis,
@@ -14,8 +14,15 @@ use rstest::rstest;
 use support::{ALLOWED_FAILS, connect, cooldowns, remote, within};
 use tokio::runtime::Handle;
 
-async fn read_active(store: &std::sync::Arc<RouterCooldowns>, model_ids: &[String]) -> Vec<(String, Cooldown)> {
-    store.active(RedisSend::Now, model_ids).unwrap().await.unwrap()
+async fn read_active(
+    store: &std::sync::Arc<RouterCooldowns>,
+    model_ids: &[String],
+) -> Vec<(String, Cooldown)> {
+    store
+        .active(RedisSend::Now, model_ids)
+        .unwrap()
+        .await
+        .unwrap()
 }
 
 /// A clock fixed just after the fixture timestamps, so every fixture cooldown is still active.
@@ -30,7 +37,10 @@ async fn put_writes_mains_str_dict_bytes_with_whole_second_ttl(
 ) {
     let deployment = RedisDeployment::start(topology).await.unwrap();
     let raw = connect(&deployment);
-    let store = std::sync::Arc::new(RouterCooldowns::new(Some(remote(connect(&deployment))), POLICY));
+    let store = std::sync::Arc::new(RouterCooldowns::new(
+        Some(remote(connect(&deployment))),
+        POLICY,
+    ));
 
     for case in cooldowns() {
         let ttl = Duration::from_secs_f64(case.ttl_seconds);
@@ -54,7 +64,11 @@ async fn reads_cooldowns_python_wrote_as_str_dict_or_json(
 ) {
     let deployment = RedisDeployment::start(topology).await.unwrap();
     let raw = connect(&deployment);
-    let store = std::sync::Arc::new(RouterCooldowns::with_clock(Some(remote(connect(&deployment))), POLICY, fixture_clock()));
+    let store = std::sync::Arc::new(RouterCooldowns::with_clock(
+        Some(remote(connect(&deployment))),
+        POLICY,
+        fixture_clock(),
+    ));
 
     for case in cooldowns() {
         let bytes = match format {
@@ -80,15 +94,23 @@ async fn an_ended_cooldown_is_not_active_but_still_counts_toward_the_minimum(
     let deployment = RedisDeployment::start(topology).await.unwrap();
     let raw = connect(&deployment);
     let late = std::sync::Arc::new(|| Duration::from_secs(1_730_000_100));
-    let store = std::sync::Arc::new(RouterCooldowns::with_clock(Some(remote(connect(&deployment))), POLICY, late));
+    let store = std::sync::Arc::new(RouterCooldowns::with_clock(
+        Some(remote(connect(&deployment))),
+        POLICY,
+        late,
+    ));
     let models = cooldowns()
         .iter()
         .map(|case| case.model_id.to_owned())
         .collect::<Vec<_>>();
     for case in cooldowns() {
-        raw.send(commands::set(case.key, case.str_dict, Duration::from_secs(60)))
-            .await
-            .unwrap();
+        raw.send(commands::set(
+            case.key,
+            case.str_dict,
+            Duration::from_secs(60),
+        ))
+        .await
+        .unwrap();
     }
 
     assert_eq!(
@@ -105,8 +127,14 @@ async fn allowed_fails_count_across_routers_and_keep_the_first_ttl(
 ) {
     let deployment = RedisDeployment::start(topology).await.unwrap();
     let raw = connect(&deployment);
-    let first = std::sync::Arc::new(RouterCooldowns::new(Some(remote(connect(&deployment))), POLICY));
-    let second = std::sync::Arc::new(RouterCooldowns::new(Some(remote(connect(&deployment))), POLICY));
+    let first = std::sync::Arc::new(RouterCooldowns::new(
+        Some(remote(connect(&deployment))),
+        POLICY,
+    ));
+    let second = std::sync::Arc::new(RouterCooldowns::new(
+        Some(remote(connect(&deployment))),
+        POLICY,
+    ));
 
     for case in ALLOWED_FAILS {
         let key = case.key;
@@ -139,10 +167,17 @@ async fn python_written_fail_counts_continue_in_rust(
 ) {
     let deployment = RedisDeployment::start(topology).await.unwrap();
     let raw = connect(&deployment);
-    let store = std::sync::Arc::new(RouterCooldowns::new(Some(remote(connect(&deployment))), POLICY));
-    raw.send(commands::incr_by("deployment:dep-a:allowed_fails", 4, Duration::from_secs(60)))
-        .await
-        .unwrap();
+    let store = std::sync::Arc::new(RouterCooldowns::new(
+        Some(remote(connect(&deployment))),
+        POLICY,
+    ));
+    raw.send(commands::incr_by(
+        "deployment:dep-a:allowed_fails",
+        4,
+        Duration::from_secs(60),
+    ))
+    .await
+    .unwrap();
 
     assert_eq!(
         store
@@ -193,7 +228,11 @@ async fn a_router_without_redis_keeps_its_cooldowns_and_counts_in_memory() {
 #[tokio::test]
 async fn a_redis_outage_serves_memory_and_counts_fails_locally() {
     let deployment = RedisDeployment::start(Topology::Standalone).await.unwrap();
-    let store = std::sync::Arc::new(RouterCooldowns::with_clock(Some(remote(connect(&deployment))), POLICY, fixture_clock()));
+    let store = std::sync::Arc::new(RouterCooldowns::with_clock(
+        Some(remote(connect(&deployment))),
+        POLICY,
+        fixture_clock(),
+    ));
     let [case, _] = cooldowns();
     store
         .put(case.model_id, &case.cooldown, Duration::from_secs(90))
@@ -201,7 +240,11 @@ async fn a_redis_outage_serves_memory_and_counts_fails_locally() {
         .unwrap();
     deployment.stop().await.unwrap();
 
-    let active = read_active(&store, &[case.model_id.to_owned(), "dep-missing".to_owned()]).await;
+    let active = read_active(
+        &store,
+        &[case.model_id.to_owned(), "dep-missing".to_owned()],
+    )
+    .await;
     let fails = store
         .increment_allowed_fails("dep-a", None, Duration::from_secs(60))
         .await
@@ -238,13 +281,21 @@ async fn a_miss_is_read_from_redis_again_only_after_the_one_second_refresh(
     let deployment = RedisDeployment::start(topology).await.unwrap();
     let raw = connect(&deployment);
     let time = StepClock::at(1_730_000_000.75);
-    let store = std::sync::Arc::new(RouterCooldowns::with_clock(Some(remote(connect(&deployment))), POLICY, time.clock()));
+    let store = std::sync::Arc::new(RouterCooldowns::with_clock(
+        Some(remote(connect(&deployment))),
+        POLICY,
+        time.clock(),
+    ));
     let [case, _] = cooldowns();
 
     let before = read_active(&store, &[case.model_id.to_owned()]).await;
-    raw.send(commands::set(case.key, case.str_dict, Duration::from_secs(60)))
-        .await
-        .unwrap();
+    raw.send(commands::set(
+        case.key,
+        case.str_dict,
+        Duration::from_secs(60),
+    ))
+    .await
+    .unwrap();
     let throttled = read_active(&store, &[case.model_id.to_owned()]).await;
     time.advance(Duration::from_secs(1));
     let refreshed = read_active(&store, &[case.model_id.to_owned()]).await;
@@ -272,7 +323,11 @@ async fn a_breaker_refusal_does_not_hold_back_the_next_read() {
     );
     let time = StepClock::at(1_730_000_000.75);
     let guarded = support::connect_guarded(&deployment, breaker);
-    let store = std::sync::Arc::new(RouterCooldowns::with_clock(Some(remote(guarded.clone())), POLICY, time.clock()));
+    let store = std::sync::Arc::new(RouterCooldowns::with_clock(
+        Some(remote(guarded.clone())),
+        POLICY,
+        time.clock(),
+    ));
     let [case, _] = cooldowns();
     deployment.stop().await.unwrap();
     read_active(&store, &[case.model_id.to_owned()]).await;
@@ -280,9 +335,13 @@ async fn a_breaker_refusal_does_not_hold_back_the_next_read() {
     let refused = read_active(&store, &[case.model_id.to_owned()]).await;
     deployment.resume().await.unwrap();
     litellm_redis_testing::eventually(async || guarded.ping().await.ok()).await;
-    raw.send(commands::set(case.key, case.str_dict, Duration::from_secs(60)))
-        .await
-        .unwrap();
+    raw.send(commands::set(
+        case.key,
+        case.str_dict,
+        Duration::from_secs(60),
+    ))
+    .await
+    .unwrap();
 
     let recovered = read_active(&store, &[case.model_id.to_owned()]).await;
 
@@ -301,12 +360,20 @@ async fn a_declared_active_read_rides_the_request_batch_and_answers_what_active_
     let deployment = RedisDeployment::start(topology).await.unwrap();
     let raw = connect(&deployment);
     let (client, trips) = support::connect_observed(&deployment);
-    let store = std::sync::Arc::new(RouterCooldowns::with_clock(Some(remote(client)), POLICY, fixture_clock()));
+    let store = std::sync::Arc::new(RouterCooldowns::with_clock(
+        Some(remote(client)),
+        POLICY,
+        fixture_clock(),
+    ));
     let models = cooldowns().map(|case| case.model_id.to_owned());
     for case in cooldowns() {
-        raw.send(commands::set(case.key, case.str_dict, Duration::from_secs(60)))
-            .await
-            .unwrap();
+        raw.send(commands::set(
+            case.key,
+            case.str_dict,
+            Duration::from_secs(60),
+        ))
+        .await
+        .unwrap();
     }
     let request = RequestRedis::new(Handle::current(), Duration::from_secs(60));
 
@@ -336,7 +403,11 @@ async fn a_cooldown_recorded_after_the_declaration_wins_over_the_redis_miss(
     #[values(Topology::Standalone, Topology::Cluster)] topology: Topology,
 ) {
     let deployment = RedisDeployment::start(topology).await.unwrap();
-    let store = std::sync::Arc::new(RouterCooldowns::with_clock(Some(remote(connect(&deployment))), POLICY, fixture_clock()));
+    let store = std::sync::Arc::new(RouterCooldowns::with_clock(
+        Some(remote(connect(&deployment))),
+        POLICY,
+        fixture_clock(),
+    ));
     let [case, _] = cooldowns();
     let request = RequestRedis::new(Handle::current(), Duration::from_secs(60));
 
@@ -369,7 +440,11 @@ async fn a_breaker_refusal_of_a_declared_read_does_not_hold_back_the_next_read()
         Box::new(|_| {}),
     );
     let guarded = support::connect_guarded(&deployment, breaker);
-    let store = std::sync::Arc::new(RouterCooldowns::with_clock(Some(remote(guarded.clone())), POLICY, fixture_clock()));
+    let store = std::sync::Arc::new(RouterCooldowns::with_clock(
+        Some(remote(guarded.clone())),
+        POLICY,
+        fixture_clock(),
+    ));
     let [case, _] = cooldowns();
     let models = [case.model_id.to_owned()];
     deployment.stop().await.unwrap();
@@ -381,14 +456,20 @@ async fn a_breaker_refusal_of_a_declared_read_does_not_hold_back_the_next_read()
     failed.await.unwrap();
     let refused_request = RequestRedis::new(Handle::current(), Duration::from_secs(60));
 
-    let refused = store.active(RedisSend::PreCall(&refused_request), &models).unwrap();
+    let refused = store
+        .active(RedisSend::PreCall(&refused_request), &models)
+        .unwrap();
     refused_request.flush_pre().await;
     let refused = refused.await.unwrap();
     deployment.resume().await.unwrap();
     litellm_redis_testing::eventually(async || guarded.ping().await.ok()).await;
-    raw.send(commands::set(case.key, case.str_dict, Duration::from_secs(60)))
-        .await
-        .unwrap();
+    raw.send(commands::set(
+        case.key,
+        case.str_dict,
+        Duration::from_secs(60),
+    ))
+    .await
+    .unwrap();
 
     assert_eq!(refused, vec![]);
     assert_eq!(

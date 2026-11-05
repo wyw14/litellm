@@ -2,8 +2,8 @@ mod support;
 
 use std::{sync::Arc, time::Duration};
 
-use litellm_redis_client::{Operation, RedisClient, Ttl};
 use litellm_redis_client::commands;
+use litellm_redis_client::{Operation, RedisClient, Ttl};
 use litellm_redis_store::Send as RedisSend;
 use litellm_redis_store::{
     Number, RequestRedis,
@@ -144,7 +144,9 @@ async fn reads_values_python_wrote_and_a_clean_miss_is_a_redis_answer(
         .map(|index| team(&format!("t{index}")))
         .collect::<Vec<_>>();
     for ((bytes, _), counter) in READS.iter().zip(&counters) {
-        raw.send(commands::set(&counter.key(), *bytes, TTL)).await.unwrap();
+        raw.send(commands::set(&counter.key(), *bytes, TTL))
+            .await
+            .unwrap();
     }
     let expected = READS
         .iter()
@@ -154,7 +156,14 @@ async fn reads_values_python_wrote_and_a_clean_miss_is_a_redis_answer(
     for (counter, value) in counters.iter().zip(&expected) {
         assert_eq!(store.read(counter).await.unwrap(), Reading::Redis(*value));
     }
-    assert_eq!(store.read_many(RedisSend::Now, &counters).unwrap().await.unwrap(), Some(expected));
+    assert_eq!(
+        store
+            .read_many(RedisSend::Now, &counters)
+            .unwrap()
+            .await
+            .unwrap(),
+        Some(expected)
+    );
     assert_eq!(
         store.read(&team("absent")).await.unwrap(),
         Reading::Redis(None)
@@ -174,7 +183,9 @@ async fn resets_and_repairs_write_mains_bytes_with_the_redis_ttl(
     for (spend, bytes) in SETS {
         store.set(&counter, spend, None).await.unwrap();
         assert_eq!(
-            raw.send(commands::get::<String>(&counter.key())).await.unwrap(),
+            raw.send(commands::get::<String>(&counter.key()))
+                .await
+                .unwrap(),
             Some(bytes.to_owned())
         );
     }
@@ -182,7 +193,9 @@ async fn resets_and_repairs_write_mains_bytes_with_the_redis_ttl(
         raw.send(commands::del(&[&counter.key()])).await.unwrap();
         let repaired = store.set_max(&counter, spend).await.unwrap();
         assert_eq!(
-            raw.send(commands::get::<String>(&counter.key())).await.unwrap(),
+            raw.send(commands::get::<String>(&counter.key()))
+                .await
+                .unwrap(),
             Some(bytes.to_owned())
         );
         assert_eq!(repaired, Some(Number::Float(spend.as_f64())));
@@ -217,7 +230,9 @@ async fn set_max_only_ever_raises_a_counter(
     assert_eq!(lower, Some(Number::Float(9.5)));
     assert_eq!(higher, Some(Number::Float(12.0)));
     assert_eq!(
-        raw.send(commands::get::<String>(&counter.key())).await.unwrap(),
+        raw.send(commands::get::<String>(&counter.key()))
+            .await
+            .unwrap(),
         Some("12.0".to_owned())
     );
     let Ttl::Expires(remaining) = raw.send(commands::ttl(&counter.key())).await.unwrap() else {
@@ -264,7 +279,9 @@ async fn increments_refresh_the_ttl_and_mirror_the_shared_total_into_memory(
     };
     assert!(within(remaining, 60), "{remaining:?}");
     assert_eq!(
-        raw.send(commands::get::<String>(&first.key())).await.unwrap(),
+        raw.send(commands::get::<String>(&first.key()))
+            .await
+            .unwrap(),
         Some("1.75".to_owned())
     );
     assert_eq!(store.get_local(&first).unwrap(), Some(Number::Float(1.75)));
@@ -295,7 +312,9 @@ async fn a_post_call_increment_from_a_thread_without_a_runtime_lands_in_redis_an
         litellm_redis_testing::eventually(async || store.get_local(&counter).unwrap()).await;
     assert_eq!(mirrored, Number::Float(3.5));
     assert_eq!(
-        raw.send(commands::get::<String>(&counter.key())).await.unwrap(),
+        raw.send(commands::get::<String>(&counter.key()))
+            .await
+            .unwrap(),
         Some("3.5".to_owned())
     );
 }
@@ -316,7 +335,12 @@ async fn post_call_increments_wait_for_the_post_batch_then_land_in_memory(
     request.flush_pre().await;
 
     assert!(trips.seen().is_empty());
-    assert_eq!(raw.send(commands::get::<String>(&counter.key())).await.unwrap(), None);
+    assert_eq!(
+        raw.send(commands::get::<String>(&counter.key()))
+            .await
+            .unwrap(),
+        None
+    );
 
     request.flush_post().await;
     tokio::time::sleep(Duration::from_millis(100)).await;
@@ -327,7 +351,9 @@ async fn post_call_increments_wait_for_the_post_batch_then_land_in_memory(
     };
     assert_eq!(trips.seen(), [increment]);
     assert_eq!(
-        raw.send(commands::get::<String>(&counter.key())).await.unwrap(),
+        raw.send(commands::get::<String>(&counter.key()))
+            .await
+            .unwrap(),
         Some("3.5".to_owned())
     );
     assert_eq!(store.get_local(&counter).unwrap(), Some(Number::Float(3.5)));
@@ -341,7 +367,10 @@ async fn the_budget_read_rides_the_same_pre_call_pipeline_as_the_cooldown_read(
     let deployment = RedisDeployment::start(topology).await.unwrap();
     let raw = connect(&deployment);
     let (client, trips) = connect_observed(&deployment);
-    let cooldowns = std::sync::Arc::new(RouterCooldowns::new(Some(remote(client.clone())), router_cooldowns::POLICY));
+    let cooldowns = std::sync::Arc::new(RouterCooldowns::new(
+        Some(remote(client.clone())),
+        router_cooldowns::POLICY,
+    ));
     let spend = store(Some(client));
     let request = RequestRedis::new(Handle::current(), LONG_DEADLINE);
     let counters = [
@@ -351,7 +380,9 @@ async fn the_budget_read_rides_the_same_pre_call_pipeline_as_the_cooldown_read(
         },
         team("t"),
     ];
-    raw.send(commands::set(&counters[0].key(), "4.5", TTL)).await.unwrap();
+    raw.send(commands::set(&counters[0].key(), "4.5", TTL))
+        .await
+        .unwrap();
 
     let active = cooldowns
         .active(RedisSend::PreCall(&request), &["dep-a".to_owned()])
@@ -396,7 +427,9 @@ async fn a_seed_lets_the_first_pod_win_and_others_answer_with_its_value(
 
     assert_eq!([won, lost], [Number::Float(10.0), Number::Float(10.0)]);
     assert_eq!(
-        raw.send(commands::get::<String>(&counter.key())).await.unwrap(),
+        raw.send(commands::get::<String>(&counter.key()))
+            .await
+            .unwrap(),
         Some("10.0".to_owned())
     );
     let Ttl::Expires(remaining) = raw.send(commands::ttl(&counter.key())).await.unwrap() else {
@@ -434,7 +467,12 @@ async fn delete_drops_memory_and_redis_and_refresh_ttl_reports_whether_redis_hel
     store.delete(&counters).await.unwrap();
 
     for counter in &counters {
-        assert_eq!(raw.send(commands::get::<String>(&counter.key())).await.unwrap(), None);
+        assert_eq!(
+            raw.send(commands::get::<String>(&counter.key()))
+                .await
+                .unwrap(),
+            None
+        );
         assert_eq!(store.get_local(counter).unwrap(), None);
     }
     assert!(!store.refresh_ttl(&counters[0]).await.unwrap());
@@ -456,7 +494,14 @@ async fn a_redis_outage_reads_memory_and_a_failed_increment_drops_the_counter() 
     assert_eq!(read, Reading::Memory(Some(Number::Float(2.0))));
     assert!(increment.is_err());
     assert_eq!(store.get_local(&failed).unwrap(), None);
-    assert_eq!(store.read_many(RedisSend::Now, &[kept]).unwrap().await.unwrap(), None);
+    assert_eq!(
+        store
+            .read_many(RedisSend::Now, &[kept])
+            .unwrap()
+            .await
+            .unwrap(),
+        None
+    );
 }
 
 #[rstest]
@@ -529,7 +574,12 @@ async fn spend_counters_send_the_commands_main_sends(
         .increment(&counters[0], Number::Float(1.5))
         .await
         .unwrap();
-    store.read_many(RedisSend::Now, &counters).unwrap().await.unwrap().unwrap();
+    store
+        .read_many(RedisSend::Now, &counters)
+        .unwrap()
+        .await
+        .unwrap()
+        .unwrap();
     store
         .set_max(&counters[0], Number::Float(9.0))
         .await

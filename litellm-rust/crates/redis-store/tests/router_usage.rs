@@ -2,8 +2,8 @@ mod support;
 
 use std::time::Duration;
 
-use litellm_redis_client::{Amount, Expiry, Operation, Ttl};
 use litellm_redis_client::commands;
+use litellm_redis_client::{Amount, Expiry, Operation, Ttl};
 use litellm_redis_store::{
     Number,
     router_usage::{COUNTER_TTL, Counter, Kind, POLICY, RouterUsage},
@@ -46,9 +46,13 @@ async fn reads_counters_python_incremented_under_mains_keys(
     let store = RouterUsage::new(Some(remote(connect(&deployment))), POLICY);
     let cases = usage();
     for (case, delta) in cases.iter().zip([7.75, 3.0]) {
-        raw.send(commands::incr_by_float(case.key, Amount::Float(delta), Some(Expiry::Refresh(COUNTER_TTL))))
-            .await
-            .unwrap();
+        raw.send(commands::incr_by_float(
+            case.key,
+            Amount::Float(delta),
+            Some(Expiry::Refresh(COUNTER_TTL)),
+        ))
+        .await
+        .unwrap();
     }
 
     assert_eq!(
@@ -78,7 +82,9 @@ async fn deployment_increments_write_incrbyfloat_totals_with_a_refreshed_minute_
         .increment_deployment("dep", model, "12-34", Number::Float(5.5), 1)
         .await
         .unwrap();
-    raw.send(commands::expire(&tpm_key, Duration::from_secs(5))).await.unwrap();
+    raw.send(commands::expire(&tpm_key, Duration::from_secs(5)))
+        .await
+        .unwrap();
     writer
         .increment_deployment("dep", model, "12-34", Number::Int(2), 1)
         .await
@@ -166,18 +172,30 @@ async fn a_late_attach_keeps_memory_and_later_attaches_are_ignored(
     let ignored = RedisDeployment::start(topology).await.unwrap();
     let store = RouterUsage::new(None, POLICY);
     let [case, _] = usage();
-    store.increment(&case.counter, Number::Int(2), COUNTER_TTL).await.unwrap();
+    store
+        .increment(&case.counter, Number::Int(2), COUNTER_TTL)
+        .await
+        .unwrap();
 
     assert!(store.attach(remote(connect(&attached))));
     assert!(!store.attach(remote(connect(&ignored))));
-    let total = store.increment(&case.counter, Number::Int(3), COUNTER_TTL).await.unwrap();
+    let total = store
+        .increment(&case.counter, Number::Int(3), COUNTER_TTL)
+        .await
+        .unwrap();
 
     assert_eq!(total, Number::Float(3.0));
     assert_eq!(
-        store.get_many(std::slice::from_ref(&case.counter)).await.unwrap(),
+        store
+            .get_many(std::slice::from_ref(&case.counter))
+            .await
+            .unwrap(),
         vec![Some(Number::Int(5))]
     );
-    let ignored_total: Option<String> = connect(&ignored).send(commands::get(case.key)).await.unwrap();
+    let ignored_total: Option<String> = connect(&ignored)
+        .send(commands::get(case.key))
+        .await
+        .unwrap();
     assert_eq!(ignored_total, None);
 }
 
@@ -213,9 +231,13 @@ async fn a_deployment_increment_is_its_own_pipeline_and_mirrors_the_redis_totals
     let counters = tpm_and_rpm(Some("model"));
     let [tpm_key, rpm_key] =
         ["tpm", "rpm"].map(|kind| format!("global_router:dep:model:{kind}:12-34"));
-    raw.send(commands::incr_by_float(&tpm_key, Amount::Float(10.0), Some(Expiry::Refresh(COUNTER_TTL))))
-        .await
-        .unwrap();
+    raw.send(commands::incr_by_float(
+        &tpm_key,
+        Amount::Float(10.0),
+        Some(Expiry::Refresh(COUNTER_TTL)),
+    ))
+    .await
+    .unwrap();
 
     store
         .increment_deployment("dep", Some("model"), "12-34", Number::Float(5.5), 1)

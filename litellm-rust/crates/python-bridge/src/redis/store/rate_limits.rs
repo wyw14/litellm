@@ -3,8 +3,8 @@ use std::{sync::Arc, time::Duration};
 use litellm_redis_store::{
     Pending,
     rate_limits::{
-        AcquireReply, Applied, AtomicCounter, AtomicReply, Counter, Entry, Gauge,
-        GuardedIncrement, GuardedReply, Increment, Local, RateLimits, Scope, WindowCount,
+        AcquireReply, Applied, AtomicCounter, AtomicReply, Counter, Entry, Gauge, GuardedIncrement,
+        GuardedReply, Increment, Local, RateLimits, Scope, WindowCount,
     },
 };
 use pyo3::{
@@ -123,7 +123,11 @@ fn acquire(reply: AcquireReply) -> (OverLimit, Vec<i64>) {
 }
 
 /// One script call declared on the batch the caller's `NativeSend` picked; `None` without Redis.
-fn script<T, R>(call_type: &'static str, declared: Option<Pending<T>>, reply: fn(T) -> R) -> Option<NativePending>
+fn script<T, R>(
+    call_type: &'static str,
+    declared: Option<Pending<T>>,
+    reply: fn(T) -> R,
+) -> Option<NativePending>
 where
     T: Send + 'static,
     R: for<'a> IntoPyObject<'a> + Send + 'static,
@@ -156,7 +160,11 @@ impl NativeRateLimits {
     }
 
     fn get_local(&self, entry: PyData<Entry>) -> PyResult<Option<PyLocal>> {
-        Ok(self.0.get_local(&entry.0).map_err(runtime_error)?.map(PyLocal))
+        Ok(self
+            .0
+            .get_local(&entry.0)
+            .map_err(runtime_error)?
+            .map(PyLocal))
     }
 
     #[pyo3(signature = (entry, value, ttl_seconds))]
@@ -317,7 +325,8 @@ impl NativeRateLimits {
         request: &NativeRequestRedis,
         increments: Vec<PyData<Increment>>,
     ) -> bool {
-        self.0.token_increment_post_call(&request.0, unwrap_all(increments))
+        self.0
+            .token_increment_post_call(&request.0, unwrap_all(increments))
     }
 
     /// `False` without Redis.

@@ -637,7 +637,10 @@ mod tests {
             health_check: None,
         })
         .unwrap();
-        client.send(commands::set("k", "1", Duration::from_secs(60))).await.unwrap();
+        client
+            .send(commands::set("k", "1", Duration::from_secs(60)))
+            .await
+            .unwrap();
         let before = server.clients().await.unwrap();
 
         let after = eventually(async || {
@@ -655,14 +658,25 @@ mod tests {
         assert_eq!(connection_users(&before), BTreeSet::from(["alice"]));
         assert_eq!(connection_ids(&after), connection_ids(&before));
         assert_eq!(
-            client.send(commands::get::<String>("k")).await.unwrap().as_deref(),
+            client
+                .send(commands::get::<String>("k"))
+                .await
+                .unwrap()
+                .as_deref(),
             Some("1")
         );
         server
             .cli_on_every_node(&["CLIENT", "KILL", "USER", "bob"])
             .await
             .unwrap();
-        let value = eventually(async || client.send(commands::get::<String>("k")).await.ok().flatten()).await;
+        let value = eventually(async || {
+            client
+                .send(commands::get::<String>("k"))
+                .await
+                .ok()
+                .flatten()
+        })
+        .await;
         let reconnected = server.clients().await.unwrap();
 
         assert_eq!(value, "1");
@@ -738,7 +752,13 @@ mod tests {
             .unwrap();
 
         let promoted = sentinel.failover().await.unwrap();
-        eventually(async || client.send(commands::set("after", "2", Duration::from_secs(60))).await.ok()).await;
+        eventually(async || {
+            client
+                .send(commands::set("after", "2", Duration::from_secs(60)))
+                .await
+                .ok()
+        })
+        .await;
         let on_promoted = sentinel.clients_on(promoted).await.unwrap();
 
         assert_eq!(promoted, sentinel.replica_port());
@@ -748,7 +768,11 @@ mod tests {
             "{on_promoted:?}"
         );
         assert_eq!(
-            client.send(commands::get::<String>("after")).await.unwrap().as_deref(),
+            client
+                .send(commands::get::<String>("after"))
+                .await
+                .unwrap()
+                .as_deref(),
             Some("2")
         );
     }

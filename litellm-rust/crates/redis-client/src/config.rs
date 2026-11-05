@@ -97,7 +97,10 @@ pub(crate) fn tls_certificates(tls: &TlsOptions) -> Result<TlsCertificates, Conn
     let client_tls = match (&tls.certfile, &tls.keyfile) {
         (Some(certfile), keyfile) => Some(ClientTlsConfig {
             client_cert: read(certfile)?,
-            client_key: client_key(keyfile.as_ref().unwrap_or(certfile), tls.key_password.as_ref())?,
+            client_key: client_key(
+                keyfile.as_ref().unwrap_or(certfile),
+                tls.key_password.as_ref(),
+            )?,
         }),
         (None, _) => None,
     };

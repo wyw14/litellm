@@ -3,7 +3,9 @@ use std::{sync::Arc, time::Duration};
 use litellm_redis_store::router_usage::{Counter, RouterUsage};
 use pyo3::{prelude::*, types::PyDict};
 
-use super::{PyData, PyNumber, policy::router_tier_policies, redis_async, remote, runtime_error, unwrap_all};
+use super::{
+    PyData, PyNumber, policy::router_tier_policies, redis_async, remote, runtime_error, unwrap_all,
+};
 use crate::redis::client::NativeRedisClient;
 
 /// One router's global TPM/RPM counters. Every caller on `main` is async.
@@ -14,7 +16,11 @@ pub(crate) struct NativeRouterUsage(Arc<RouterUsage>);
 impl NativeRouterUsage {
     #[new]
     #[pyo3(signature = (client, redis_ttl_seconds = 60))]
-    fn new(py: Python<'_>, client: Option<PyRef<'_, NativeRedisClient>>, redis_ttl_seconds: u64) -> PyResult<Self> {
+    fn new(
+        py: Python<'_>,
+        client: Option<PyRef<'_, NativeRedisClient>>,
+        redis_ttl_seconds: u64,
+    ) -> PyResult<Self> {
         let remote = client.map(|client| remote(&client, redis_ttl_seconds));
         let policy = router_tier_policies(py)?.usage;
         Ok(Self(Arc::new(RouterUsage::new(remote, policy))))

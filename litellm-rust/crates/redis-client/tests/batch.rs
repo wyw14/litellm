@@ -6,11 +6,11 @@ use std::{
 };
 
 use litellm_circuit_breaker::{State, Transition};
-use litellm_redis_client::{
-    Amount, CallEvent, Credentials, Declared, DEFAULT_TIMEOUT, Error, Expiry, Namespace, Operation, RedisClient,
-    RedisBatch, RedisConfig, RedisEvents, Script, Timeouts, Ttl,
-};
 use litellm_redis_client::commands;
+use litellm_redis_client::{
+    Amount, CallEvent, Credentials, DEFAULT_TIMEOUT, Declared, Error, Expiry, Namespace, Operation,
+    RedisBatch, RedisClient, RedisConfig, RedisEvents, Script, Timeouts, Ttl,
+};
 use litellm_redis_testing::{RedisDeployment, Topology};
 use rstest::rstest;
 use support::{connect, endpoint};
@@ -71,7 +71,10 @@ async fn declared_ops_wait_for_the_flush_and_share_one_round_trip(
     let read = batch.add(commands::get::<String>("value"));
 
     let outside = connect(&server, "ns", DEFAULT_TIMEOUT);
-    assert_eq!(outside.send(commands::get::<i64>("counter")).await.unwrap(), None);
+    assert_eq!(
+        outside.send(commands::get::<i64>("counter")).await.unwrap(),
+        None
+    );
     assert!(trips.seen().is_empty());
 
     batch.flush().await;
@@ -135,11 +138,15 @@ async fn a_pipelined_batch_is_one_pipeline_on_every_topology(
     let server = RedisDeployment::start(topology).await.unwrap();
     let (client, trips) = observed(&server);
     let batch = RedisBatch::pipelined(client);
-    let declared = ["a", "b", "c"].map(|key| batch.add(commands::incr_by_float(key, Amount::Int(2), MINUTE)));
+    let declared =
+        ["a", "b", "c"].map(|key| batch.add(commands::incr_by_float(key, Amount::Int(2), MINUTE)));
 
     let totals = Declared::all(declared).await;
 
-    assert_eq!(totals.into_iter().map(Result::unwrap).collect::<Vec<_>>(), [2.0; 3]);
+    assert_eq!(
+        totals.into_iter().map(Result::unwrap).collect::<Vec<_>>(),
+        [2.0; 3]
+    );
     assert_eq!(trips.seen(), [Operation::Pipeline { ops: 3 }]);
 }
 
@@ -151,7 +158,11 @@ async fn each_declared_op_gets_its_own_typed_result(
     let server = RedisDeployment::start(topology).await.unwrap();
     let client = connect(&server, "", DEFAULT_TIMEOUT);
     client
-        .send(commands::set("text", "not a number", Duration::from_secs(60)))
+        .send(commands::set(
+            "text",
+            "not a number",
+            Duration::from_secs(60),
+        ))
         .await
         .unwrap();
     let batch = client.batch();
@@ -253,8 +264,14 @@ async fn mget_reads_each_key_once_in_order_in_one_command(
 ) {
     let server = RedisDeployment::start(topology).await.unwrap();
     let client = connect(&server, "", DEFAULT_TIMEOUT);
-    client.send(commands::set("a", "1", Duration::from_secs(60))).await.unwrap();
-    client.send(commands::set("c", "3", Duration::from_secs(60))).await.unwrap();
+    client
+        .send(commands::set("a", "1", Duration::from_secs(60)))
+        .await
+        .unwrap();
+    client
+        .send(commands::set("c", "3", Duration::from_secs(60)))
+        .await
+        .unwrap();
     server
         .cli_on_every_node(&["CONFIG", "RESETSTAT"])
         .await
@@ -291,7 +308,11 @@ async fn a_batched_increment_treats_the_ttl_like_redis_batch(
         .unwrap();
     let batch = client.batch();
 
-    let counter = batch.add(commands::incr_by_float("counter", Amount::Int(1), Some(Expiry::KeepExisting(Duration::from_secs(600)))));
+    let counter = batch.add(commands::incr_by_float(
+        "counter",
+        Amount::Int(1),
+        Some(Expiry::KeepExisting(Duration::from_secs(600))),
+    ));
     batch.flush().await;
 
     assert_eq!(counter.resolve().await.unwrap(), 2.0);

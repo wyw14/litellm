@@ -2,8 +2,8 @@ mod support;
 
 use std::time::Duration;
 
-use litellm_redis_client::{Amount, Expiry, Operation};
 use litellm_redis_client::commands;
+use litellm_redis_client::{Amount, Expiry, Operation};
 use litellm_redis_store::RequestRedis;
 use litellm_redis_testing::{RedisDeployment, Topology};
 use rstest::rstest;
@@ -31,11 +31,16 @@ async fn pre_declarations_on_one_client_share_one_pipeline_and_another_client_ge
     let (other, other_trips) = connect_observed(&deployment);
     let request = RequestRedis::new(Handle::current(), LONG_DEADLINE);
 
-    let first = request.pre(&client).add(commands::incr_by_float("a", Amount::Int(1), TTL));
-    let second = request
-        .pre(&client.clone())
-        .add(commands::incr_by_float("b", Amount::Int(2), TTL));
-    let third = request.pre(&other).add(commands::incr_by_float("c", Amount::Int(3), TTL));
+    let first = request
+        .pre(&client)
+        .add(commands::incr_by_float("a", Amount::Int(1), TTL));
+    let second =
+        request
+            .pre(&client.clone())
+            .add(commands::incr_by_float("b", Amount::Int(2), TTL));
+    let third = request
+        .pre(&other)
+        .add(commands::incr_by_float("c", Amount::Int(3), TTL));
     request.flush_pre().await;
 
     assert_eq!(trips.seen(), increments(topology, 2));
@@ -72,7 +77,10 @@ async fn a_post_declaration_waits_for_flush_post_and_flush_pre_leaves_it_alone(
 
     assert!(!total.is_finished());
     assert!(trips.seen().is_empty());
-    assert_eq!(raw.send(commands::get::<String>("spend")).await.unwrap(), None);
+    assert_eq!(
+        raw.send(commands::get::<String>("spend")).await.unwrap(),
+        None
+    );
 
     request.flush_post().await;
 
@@ -88,9 +96,10 @@ async fn flush_post_returns_after_the_follow_ups_of_the_ops_it_sent(
     let deployment = RedisDeployment::start(topology).await.unwrap();
     let client = connect(&deployment);
     let request = RequestRedis::new(Handle::current(), LONG_DEADLINE);
-    let total = request
-        .post(&client)
-        .add(commands::incr_by_float("spend", Amount::Float(2.5), TTL));
+    let total =
+        request
+            .post(&client)
+            .add(commands::incr_by_float("spend", Amount::Float(2.5), TTL));
     let (mirror, mut mirrored) = oneshot::channel();
     request.spawn(async move {
         mirror.send(total.settled().await.unwrap()).unwrap();

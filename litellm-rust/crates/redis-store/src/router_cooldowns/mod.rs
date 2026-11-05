@@ -50,11 +50,20 @@ impl RouterCooldowns {
     }
 
     /// Memory first, then a `SET ... EX int(ttl)` whose failure only logs, like `DualCache.set_cache`.
-    pub async fn put(&self, model_id: &str, cooldown: &Cooldown, ttl: Duration) -> Result<(), Error> {
+    pub async fn put(
+        &self,
+        model_id: &str,
+        cooldown: &Cooldown,
+        ttl: Duration,
+    ) -> Result<(), Error> {
         let key = keys::cooldown(model_id);
-        self.cooldowns.memory().set(&key, cooldown.clone(), Some(ttl))?;
+        self.cooldowns
+            .memory()
+            .set(&key, cooldown.clone(), Some(ttl))?;
         if let Some(client) = self.remote.client()
-            && let Err(error) = client.send(commands::set(&key, cooldown.encode(), ttl)).await
+            && let Err(error) = client
+                .send(commands::set(&key, cooldown.encode(), ttl))
+                .await
         {
             tracing::warn!(%error, "writing a cooldown to Redis failed");
         }
@@ -121,7 +130,9 @@ impl RouterCooldowns {
             .get_many(&self.remote, &keys::cooldowns(model_ids), Cooldown::decode)
             .await?;
         Ok(Number::min(
-            read.into_iter().flatten().map(|cooldown| cooldown.cooldown_time),
+            read.into_iter()
+                .flatten()
+                .map(|cooldown| cooldown.cooldown_time),
         ))
     }
 
@@ -151,7 +162,11 @@ impl RouterCooldowns {
         let remaining = Duration::from_secs_f64(remaining);
         if memory.expires_at(&key)? > Some(now + remaining + CORRECTION_SLACK) {
             memory.delete(&key)?;
-            memory.set(&key, cooldown.clone(), Some(remaining.min(MAX_CORRECTED_TTL)))?;
+            memory.set(
+                &key,
+                cooldown.clone(),
+                Some(remaining.min(MAX_CORRECTED_TTL)),
+            )?;
         }
         Ok(true)
     }

@@ -3,7 +3,10 @@ pub(super) fn cooldown(model_id: &str) -> String {
 }
 
 pub(super) fn cooldowns(model_ids: &[String]) -> Vec<String> {
-    model_ids.iter().map(|model_id| cooldown(model_id)).collect()
+    model_ids
+        .iter()
+        .map(|model_id| cooldown(model_id))
+        .collect()
 }
 
 pub(super) fn allowed_fails(model_id: &str, suffix: Option<&str>) -> String {

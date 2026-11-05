@@ -49,13 +49,19 @@ impl RouterUsage {
 
     /// `DualCache.async_increment_cache`: memory, then `INCRBYFLOAT` keeping an existing TTL.
     /// A Redis failure answers with the memory count.
-    pub async fn increment(&self, counter: &Counter, value: Number, ttl: Duration) -> Result<Number, Error> {
+    pub async fn increment(
+        &self,
+        counter: &Counter,
+        value: Number,
+        ttl: Duration,
+    ) -> Result<Number, Error> {
         let key = counter.key();
         let local = self.add_local(&key, value, ttl)?;
         let Some(client) = self.remote.client() else {
             return Ok(local);
         };
-        let increment = commands::incr_by_float(&key, value.into(), Some(Expiry::KeepExisting(ttl)));
+        let increment =
+            commands::incr_by_float(&key, value.into(), Some(Expiry::KeepExisting(ttl)));
         match client.send(increment).await {
             Ok(total) => Ok(Number::Float(total)),
             Err(error) => {
@@ -95,7 +101,11 @@ impl RouterUsage {
         };
         let pipeline = RedisBatch::pipelined(client.clone());
         let totals = counts.iter().map(|(key, value)| {
-            pipeline.add(commands::incr_by_float(key, (*value).into(), Some(Expiry::Refresh(COUNTER_TTL))))
+            pipeline.add(commands::incr_by_float(
+                key,
+                (*value).into(),
+                Some(Expiry::Refresh(COUNTER_TTL)),
+            ))
         });
         let totals = Declared::all(totals.collect::<Vec<_>>())
             .await
@@ -108,17 +118,23 @@ impl RouterUsage {
                 local
             }
         };
-        counts.iter().zip(totals).try_for_each(|((key, _), total)| {
-            self.usage
-                .memory()
-                .set(key, Number::Int(total.truncate()), Some(COUNTER_TTL))
-        })?;
+        counts
+            .iter()
+            .zip(totals)
+            .try_for_each(|((key, _), total)| {
+                self.usage
+                    .memory()
+                    .set(key, Number::Int(total.truncate()), Some(COUNTER_TTL))
+            })?;
         Ok(())
     }
 
     pub async fn get_many(&self, counters: &[Counter]) -> Result<Vec<Option<Number>>, Error> {
         let keys = counters.iter().map(Counter::key).collect::<Vec<_>>();
-        Ok(self.usage.get_many(&self.remote, &keys, types::decode).await?)
+        Ok(self
+            .usage
+            .get_many(&self.remote, &keys, types::decode)
+            .await?)
     }
 
     pub fn flush_local_counters(&self) -> Result<(), Error> {

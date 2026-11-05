@@ -8,11 +8,11 @@ use litellm_redis_testing::{
 };
 use rstest::rstest;
 
+use litellm_redis_client::commands;
 use litellm_redis_client::{
     Credentials, CredentialsProvider, Error, Namespace, Node, RedisClient, RedisConfig, Sentinel,
     Standalone, Target, Timeouts,
 };
-use litellm_redis_client::commands;
 use litellm_secret_value::SecretValue;
 use support::{Rotating, connect_as, connections};
 
@@ -39,7 +39,10 @@ async fn a_pushed_credential_reauthenticates_the_live_connection_and_a_reconnect
         &server,
         Credentials::Provider(CredentialsProvider(provider.clone())),
     );
-    client.send(commands::set("k", "1", Duration::from_secs(60))).await.unwrap();
+    client
+        .send(commands::set("k", "1", Duration::from_secs(60)))
+        .await
+        .unwrap();
     let before = connections(&server).await;
 
     provider.rotate("bob", "second");
@@ -56,7 +59,14 @@ async fn a_pushed_credential_reauthenticates_the_live_connection_and_a_reconnect
         .cli_on_every_node(&["CLIENT", "KILL", "USER", "bob"])
         .await
         .unwrap();
-    let after_reconnect = eventually(async || client.send(commands::get::<String>("k")).await.ok().flatten()).await;
+    let after_reconnect = eventually(async || {
+        client
+            .send(commands::get::<String>("k"))
+            .await
+            .ok()
+            .flatten()
+    })
+    .await;
 
     let reconnected = connections(&server).await;
 
@@ -185,7 +195,11 @@ async fn sentinel_writes_follow_the_master_through_a_failover() {
 
     assert_eq!(promoted, sentinel.replica_port());
     assert_eq!(
-        client.send(commands::get::<String>("before")).await.unwrap().as_deref(),
+        client
+            .send(commands::get::<String>("before"))
+            .await
+            .unwrap()
+            .as_deref(),
         Some("1")
     );
     let promoted = redis::Client::open(format!("redis://127.0.0.1:{promoted}")).unwrap();

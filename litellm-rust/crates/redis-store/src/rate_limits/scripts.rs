@@ -9,7 +9,10 @@ use litellm_redis_client::{
 use super::{
     keys::{Counter, Scope},
     lua,
-    types::{AcquireReply, Applied, AtomicCounter, AtomicReply, Gauge, GuardedIncrement, GuardedReply, Increment, WindowCount},
+    types::{
+        AcquireReply, Applied, AtomicCounter, AtomicReply, Gauge, GuardedIncrement, GuardedReply,
+        Increment, WindowCount,
+    },
 };
 use crate::Number;
 
@@ -36,11 +39,21 @@ pub(super) fn sliding_window(
         .iter()
         .flat_map(|counter| [counter.scope.window_key(), counter.key()])
         .collect::<Vec<_>>();
-    batch.add(eval(&BATCH_RATE_LIMITER, &keys, vec![now.to_string(), window_size.to_string()],).map(window_counts))
+    batch.add(
+        eval(
+            &BATCH_RATE_LIMITER,
+            &keys,
+            vec![now.to_string(), window_size.to_string()],
+        )
+        .map(window_counts),
+    )
 }
 
 /// `BATCH_COUNTER_READ_SCRIPT` over each counter's window and counter keys, in that order.
-pub(super) fn read_counters(batch: &RedisBatch, counters: &[Counter]) -> Declared<Vec<Option<String>>> {
+pub(super) fn read_counters(
+    batch: &RedisBatch,
+    counters: &[Counter],
+) -> Declared<Vec<Option<String>>> {
     let keys = counters
         .iter()
         .flat_map(|counter| [counter.scope.window_key(), counter.key()])
@@ -183,19 +196,23 @@ fn items(reply: Value) -> Result<Vec<Value>, Error> {
 fn integer(value: &Value) -> Result<i64, Error> {
     match value {
         Value::Int(value) => Ok(*value),
-        _ => Err(unexpected_reply("rate limiter script reply holds a non-integer where a count belongs")),
+        _ => Err(unexpected_reply(
+            "rate limiter script reply holds a non-integer where a count belongs",
+        )),
     }
 }
 
 fn text(value: &Value) -> Result<Option<String>, Error> {
     match value {
         Value::Nil => Ok(None),
-        Value::BulkString(bytes) => String::from_utf8(bytes.clone())
-            .map(Some)
-            .map_err(|_| unexpected_reply("rate limiter script reply holds a value that is not UTF-8")),
+        Value::BulkString(bytes) => String::from_utf8(bytes.clone()).map(Some).map_err(|_| {
+            unexpected_reply("rate limiter script reply holds a value that is not UTF-8")
+        }),
         Value::SimpleString(text) => Ok(Some(text.clone())),
         Value::Int(value) => Ok(Some(value.to_string())),
-        _ => Err(unexpected_reply("rate limiter script reply holds a nested value")),
+        _ => Err(unexpected_reply(
+            "rate limiter script reply holds a nested value",
+        )),
     }
 }
 
@@ -206,7 +223,8 @@ fn float(reply: Value) -> Result<f64, Error> {
 }
 
 fn index(raw: &Value) -> Result<usize, Error> {
-    usize::try_from(integer(raw)? - 1).map_err(|_| unexpected_reply("rate limiter script reply names an index below 1"))
+    usize::try_from(integer(raw)? - 1)
+        .map_err(|_| unexpected_reply("rate limiter script reply names an index below 1"))
 }
 
 fn window_counts(reply: Value) -> Result<Vec<WindowCount>, Error> {
@@ -214,11 +232,14 @@ fn window_counts(reply: Value) -> Result<Vec<WindowCount>, Error> {
         .chunks(2)
         .map(|pair| match pair {
             [window_start, count] => Ok(WindowCount {
-                window_start: text(window_start)?
-                    .ok_or_else(|| unexpected_reply("rate limiter script reply holds a nil window start"))?,
+                window_start: text(window_start)?.ok_or_else(|| {
+                    unexpected_reply("rate limiter script reply holds a nil window start")
+                })?,
                 count: integer(count)?,
             }),
-            _ => Err(unexpected_reply("rate limiter script reply has an odd length")),
+            _ => Err(unexpected_reply(
+                "rate limiter script reply has an odd length",
+            )),
         })
         .collect()
 }
@@ -245,7 +266,9 @@ fn atomic_reply(reply: Value) -> Result<AtomicReply, Error> {
                     count: integer(count)?,
                     window_start: integer(window_start)?,
                 }),
-                _ => Err(unexpected_reply("rate limiter script reply has an odd length")),
+                _ => Err(unexpected_reply(
+                    "rate limiter script reply has an odd length",
+                )),
             })
             .collect::<Result<_, _>>()
             .map(AtomicReply::Applied),
@@ -264,7 +287,9 @@ fn guarded_reply(reply: Value) -> Result<GuardedReply, Error> {
             applied: integer(applied)? == 1,
             count: integer(count)?,
         }),
-        _ => Err(unexpected_reply("rate limiter script reply is not an (applied, count) pair")),
+        _ => Err(unexpected_reply(
+            "rate limiter script reply is not an (applied, count) pair",
+        )),
     }
 }
 

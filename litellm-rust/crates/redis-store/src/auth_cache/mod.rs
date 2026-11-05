@@ -78,7 +78,12 @@ impl AuthCache {
     /// `DualCache.async_get_cache`, backfilling memory for `default_in_memory_ttl`.
     pub async fn get(&self, key: &str) -> Result<Option<Value>, Error> {
         self.remote
-            .read_through(self.memory(key), key, python_value, self.settings.memory_ttl)
+            .read_through(
+                self.memory(key),
+                key,
+                python_value,
+                self.settings.memory_ttl,
+            )
             .await
     }
 
@@ -105,7 +110,12 @@ impl AuthCache {
     }
 
     /// `DualCache.set_cache`, whose `RedisCache.set_cache` writes `str(value)`.
-    pub async fn set_str(&self, key: &str, value: Value, ttl: Option<Duration>) -> Result<(), Error> {
+    pub async fn set_str(
+        &self,
+        key: &str,
+        value: Value,
+        ttl: Option<Duration>,
+    ) -> Result<(), Error> {
         let encoded = to_str(&value);
         self.set_local(key, value, ttl)?;
         let Some(remote) = self.remote.get() else {
@@ -132,10 +142,11 @@ impl AuthCache {
             return Ok(ready(()));
         };
         match encoded {
-            Ok(bytes) => Ok(pending(
-                send.batch(&remote.client)
-                    .add(commands::set(key, bytes, self.redis_ttl(remote, ttl))),
-            )),
+            Ok(bytes) => Ok(pending(send.batch(&remote.client).add(commands::set(
+                key,
+                bytes,
+                self.redis_ttl(remote, ttl),
+            )))),
             Err(error) => {
                 tracing::warn!(%error, "an auth cache value is not JSON serializable, kept in memory only");
                 Ok(ready(()))
@@ -150,12 +161,18 @@ impl AuthCache {
             return Ok(ready(()));
         };
         let deleted = batch.add(commands::del(&[key]));
-        Ok(Box::pin(async move { Ok(deleted.resolve().await.map(drop)?) }))
+        Ok(Box::pin(
+            async move { Ok(deleted.resolve().await.map(drop)?) },
+        ))
     }
 
     /// `UserApiKeyCache.async_set_cache_pipeline`: the key-object entries in one pipeline, then
     /// the rest in another, each with one TTL.
-    pub async fn set_many(&self, entries: Vec<(String, Value)>, ttl: Option<Duration>) -> Result<(), Error> {
+    pub async fn set_many(
+        &self,
+        entries: Vec<(String, Value)>,
+        ttl: Option<Duration>,
+    ) -> Result<(), Error> {
         let (key_objects, others): (Vec<_>, Vec<_>) =
             entries.into_iter().partition(|(key, _)| is_key_object(key));
         for partition in [key_objects, others] {
@@ -197,7 +214,10 @@ impl AuthCache {
         let pipeline = RedisBatch::pipelined(remote.client.clone());
         let written: Vec<_> = sets.into_iter().map(|set| pipeline.add(set)).collect();
         Ok(Box::pin(async move {
-            Declared::all(written).await.into_iter().try_for_each(|reply| Ok(reply?))
+            Declared::all(written)
+                .await
+                .into_iter()
+                .try_for_each(|reply| Ok(reply?))
         }))
     }
 
@@ -223,7 +243,10 @@ impl AuthCache {
     /// whole read, as a failed `MGET` does.
     pub fn get_many(&self, send: Send<'_>, keys: &[String]) -> Option<Pending<Vec<Option<Value>>>> {
         let keys: Vec<&str> = keys.iter().map(String::as_str).collect();
-        let read = self.remote.batch(send)?.add(commands::mget::<Vec<u8>>(&keys));
+        let read = self
+            .remote
+            .batch(send)?
+            .add(commands::mget::<Vec<u8>>(&keys));
         Some(Box::pin(async move {
             read.resolve()
                 .await?
@@ -235,12 +258,18 @@ impl AuthCache {
 
     /// `RedisCache.async_increment_if_present`: `INCRBYFLOAT` only an entry Redis still holds.
     /// `None` without Redis or for an absent entry.
-    pub async fn increment_if_present(&self, key: &str, amount: Number) -> Result<Option<f64>, Error> {
+    pub async fn increment_if_present(
+        &self,
+        key: &str,
+        amount: Number,
+    ) -> Result<Option<f64>, Error> {
         let Some(client) = self.remote.client() else {
             return Ok(None);
         };
         let amount = litellm_redis_client::Amount::from(amount);
-        Ok(client.send(commands::eval_source(INCREMENT_IF_PRESENT, &[key], amount)).await?)
+        Ok(client
+            .send(commands::eval_source(INCREMENT_IF_PRESENT, &[key], amount))
+            .await?)
     }
 
     fn memory(&self, key: &str) -> &Memory<Value> {
@@ -260,11 +289,17 @@ impl AuthCache {
         self.memory_ttl(ttl).unwrap_or(remote.default_ttl)
     }
 
-    async fn set_partition(&self, entries: Vec<(String, Value)>, ttl: Option<Duration>) -> Result<(), Error> {
-        let target = self
-            .remote
-            .get()
-            .map(|remote| (RedisBatch::pipelined(remote.client.clone()), self.redis_ttl(remote, ttl)));
+    async fn set_partition(
+        &self,
+        entries: Vec<(String, Value)>,
+        ttl: Option<Duration>,
+    ) -> Result<(), Error> {
+        let target = self.remote.get().map(|remote| {
+            (
+                RedisBatch::pipelined(remote.client.clone()),
+                self.redis_ttl(remote, ttl),
+            )
+        });
         let written = entries
             .into_iter()
             .map(|(key, value)| {

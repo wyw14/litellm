@@ -58,14 +58,17 @@ impl RateLimits {
         scopes
             .iter()
             .enumerate()
-            .fold(Vec::<(Slot, Vec<usize>)>::new(), |mut groups, (index, scope)| {
-                let slot = Slot::for_key(scope.window_key());
-                match groups.iter_mut().find(|(seen, _)| *seen == slot) {
-                    Some((_, members)) => members.push(index),
-                    None => groups.push((slot, vec![index])),
-                }
-                groups
-            })
+            .fold(
+                Vec::<(Slot, Vec<usize>)>::new(),
+                |mut groups, (index, scope)| {
+                    let slot = Slot::for_key(scope.window_key());
+                    match groups.iter_mut().find(|(seen, _)| *seen == slot) {
+                        Some((_, members)) => members.push(index),
+                        None => groups.push((slot, vec![index])),
+                    }
+                    groups
+                },
+            )
             .into_iter()
             .map(|(_, members)| members)
             .collect()
@@ -75,12 +78,21 @@ impl RateLimits {
         Ok(self.memory.get(&entry.key())?)
     }
 
-    pub fn set_local(&self, entry: &Entry, value: Local, ttl: Option<Duration>) -> Result<(), Error> {
+    pub fn set_local(
+        &self,
+        entry: &Entry,
+        value: Local,
+        ttl: Option<Duration>,
+    ) -> Result<(), Error> {
         Ok(self.memory.set(&entry.key(), value, ttl)?)
     }
 
     /// `DualCache.async_get_cache`, backfilling memory for `backfill_ttl` or the store's default.
-    pub async fn get(&self, entry: &Entry, backfill_ttl: Option<Duration>) -> Result<Option<Local>, Error> {
+    pub async fn get(
+        &self,
+        entry: &Entry,
+        backfill_ttl: Option<Duration>,
+    ) -> Result<Option<Local>, Error> {
         let backfill_ttl = backfill_ttl.or(self.backfill_ttl);
         self.remote
             .read_through(&self.memory, &entry.key(), types::decode, backfill_ttl)
@@ -94,19 +106,45 @@ impl RateLimits {
         now: i64,
         window_size: i64,
     ) -> Option<Pending<Vec<WindowCount>>> {
-        Some(pending(scripts::sliding_window(&self.batch(send)?, counters, now, window_size)))
+        Some(pending(scripts::sliding_window(
+            &self.batch(send)?,
+            counters,
+            now,
+            window_size,
+        )))
     }
 
-    pub fn read_counters(&self, send: Send<'_>, counters: &[Counter]) -> Option<Pending<Vec<Option<String>>>> {
-        Some(pending(scripts::read_counters(&self.batch(send)?, counters)))
+    pub fn read_counters(
+        &self,
+        send: Send<'_>,
+        counters: &[Counter],
+    ) -> Option<Pending<Vec<Option<String>>>> {
+        Some(pending(scripts::read_counters(
+            &self.batch(send)?,
+            counters,
+        )))
     }
 
-    pub fn check_and_increment(&self, send: Send<'_>, counters: &[AtomicCounter]) -> Option<Pending<AtomicReply>> {
-        Some(pending(scripts::check_and_increment(&self.batch(send)?, counters)))
+    pub fn check_and_increment(
+        &self,
+        send: Send<'_>,
+        counters: &[AtomicCounter],
+    ) -> Option<Pending<AtomicReply>> {
+        Some(pending(scripts::check_and_increment(
+            &self.batch(send)?,
+            counters,
+        )))
     }
 
-    pub fn guarded_increment(&self, send: Send<'_>, increment: &GuardedIncrement) -> Option<Pending<GuardedReply>> {
-        Some(pending(scripts::guarded_increment(&self.batch(send)?, increment)))
+    pub fn guarded_increment(
+        &self,
+        send: Send<'_>,
+        increment: &GuardedIncrement,
+    ) -> Option<Pending<GuardedReply>> {
+        Some(pending(scripts::guarded_increment(
+            &self.batch(send)?,
+            increment,
+        )))
     }
 
     pub fn parallel_acquire(
@@ -116,25 +154,53 @@ impl RateLimits {
         slot_ttl: Duration,
         slot_id: &str,
     ) -> Option<Pending<AcquireReply>> {
-        Some(pending(scripts::parallel_acquire(&self.batch(send)?, gauges, slot_ttl, slot_id)))
+        Some(pending(scripts::parallel_acquire(
+            &self.batch(send)?,
+            gauges,
+            slot_ttl,
+            slot_id,
+        )))
     }
 
-    pub fn parallel_release(&self, send: Send<'_>, gauges: &[Scope], slot_id: &str) -> Option<Pending<Vec<i64>>> {
+    pub fn parallel_release(
+        &self,
+        send: Send<'_>,
+        gauges: &[Scope],
+        slot_id: &str,
+    ) -> Option<Pending<Vec<i64>>> {
         Some(pending(self.declare_release(send, gauges, slot_id)?))
     }
 
-    pub fn parallel_count(&self, send: Send<'_>, gauges: &[Scope], slot_ttl: Duration) -> Option<Pending<Vec<i64>>> {
-        Some(pending(scripts::parallel_count(&self.batch(send)?, gauges, slot_ttl)))
+    pub fn parallel_count(
+        &self,
+        send: Send<'_>,
+        gauges: &[Scope],
+        slot_ttl: Duration,
+    ) -> Option<Pending<Vec<i64>>> {
+        Some(pending(scripts::parallel_count(
+            &self.batch(send)?,
+            gauges,
+            slot_ttl,
+        )))
     }
 
-    pub fn token_increment(&self, send: Send<'_>, increments: &[Increment]) -> Option<Pending<Vec<f64>>> {
+    pub fn token_increment(
+        &self,
+        send: Send<'_>,
+        increments: &[Increment],
+    ) -> Option<Pending<Vec<f64>>> {
         Some(pending(self.declare_token_increment(send, increments)?))
     }
 
     /// `TOKEN_INCREMENT_SCRIPT` on the request's post-call batch. A failed script falls back to
     /// `increment_many` for these increments once the batch has gone out. `false` without Redis.
-    pub fn token_increment_post_call(self: &Arc<Self>, request: &RequestRedis, increments: Vec<Increment>) -> bool {
-        let Some(declared) = self.declare_token_increment(Send::PostCall(request), &increments) else {
+    pub fn token_increment_post_call(
+        self: &Arc<Self>,
+        request: &RequestRedis,
+        increments: Vec<Increment>,
+    ) -> bool {
+        let Some(declared) = self.declare_token_increment(Send::PostCall(request), &increments)
+        else {
             return false;
         };
         let store = Arc::clone(self);
@@ -152,7 +218,12 @@ impl RateLimits {
 
     /// `PARALLEL_RELEASE_SCRIPT` on the request's post-call batch; the caller has already freed
     /// the slot in memory. `false` without Redis.
-    pub fn parallel_release_post_call(&self, request: &RequestRedis, gauges: &[Scope], slot_id: &str) -> bool {
+    pub fn parallel_release_post_call(
+        &self,
+        request: &RequestRedis,
+        gauges: &[Scope],
+        slot_id: &str,
+    ) -> bool {
         let Some(declared) = self.declare_release(Send::PostCall(request), gauges, slot_id) else {
             return false;
         };
@@ -212,7 +283,11 @@ impl RateLimits {
 
     /// `DualCache.async_increment_cache_pipeline_post_call`: memory now, the Redis increments on
     /// the request's post-call batch.
-    pub fn increment_many_post_call(&self, request: &RequestRedis, increments: &[Increment]) -> Result<(), Error> {
+    pub fn increment_many_post_call(
+        &self,
+        request: &RequestRedis,
+        increments: &[Increment],
+    ) -> Result<(), Error> {
         increments
             .iter()
             .try_for_each(|increment| self.add_local(increment).map(drop))?;
@@ -232,11 +307,24 @@ impl RateLimits {
         Ok(())
     }
 
-    fn declare_release(&self, send: Send<'_>, gauges: &[Scope], slot_id: &str) -> Option<Declared<Vec<i64>>> {
-        Some(scripts::parallel_release(&self.batch(send)?, gauges, slot_id))
+    fn declare_release(
+        &self,
+        send: Send<'_>,
+        gauges: &[Scope],
+        slot_id: &str,
+    ) -> Option<Declared<Vec<i64>>> {
+        Some(scripts::parallel_release(
+            &self.batch(send)?,
+            gauges,
+            slot_id,
+        ))
     }
 
-    fn declare_token_increment(&self, send: Send<'_>, increments: &[Increment]) -> Option<Declared<Vec<f64>>> {
+    fn declare_token_increment(
+        &self,
+        send: Send<'_>,
+        increments: &[Increment],
+    ) -> Option<Declared<Vec<f64>>> {
         Some(scripts::token_increment(&self.batch(send)?, increments))
     }
 

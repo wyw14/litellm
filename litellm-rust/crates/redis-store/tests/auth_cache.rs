@@ -3,8 +3,8 @@ mod support;
 use std::time::Duration;
 
 use litellm_python_compat::Value;
-use litellm_redis_client::{Operation, RedisClient, Ttl};
 use litellm_redis_client::commands;
+use litellm_redis_client::{Operation, RedisClient, Ttl};
 use litellm_redis_store::Send as RedisSend;
 use litellm_redis_store::{
     Number, Remote, RequestRedis,
@@ -175,12 +175,18 @@ async fn writes_mains_json_and_str_bytes(
         let key = format!("team_id:t{index}");
         store.set(&key, value.clone(), None).await.unwrap();
         assert_eq!(
-            raw.send(commands::get::<String>(&key)).await.unwrap().as_deref(),
+            raw.send(commands::get::<String>(&key))
+                .await
+                .unwrap()
+                .as_deref(),
             Some(json)
         );
         store.set_str(&key, value, None).await.unwrap();
         assert_eq!(
-            raw.send(commands::get::<String>(&key)).await.unwrap().as_deref(),
+            raw.send(commands::get::<String>(&key))
+                .await
+                .unwrap()
+                .as_deref(),
             Some(printed)
         );
     }
@@ -197,7 +203,9 @@ async fn reads_every_encoding_main_writes_and_backfills_memory(
 
     for (index, (bytes, expected)) in read_back().into_iter().enumerate() {
         let key = format!("user_id:u{index}");
-        raw.send(commands::set(&key, bytes, Duration::from_secs(60))).await.unwrap();
+        raw.send(commands::set(&key, bytes, Duration::from_secs(60)))
+            .await
+            .unwrap();
 
         assert_eq!(store.get(&key).await.unwrap(), Some(expected.clone()));
         raw.send(commands::del(&[&key])).await.unwrap();
@@ -290,7 +298,12 @@ async fn a_value_json_refuses_stays_in_memory_and_never_reaches_redis(
         .unwrap();
 
     assert_eq!(store.get_local("team_id:set").unwrap(), Some(members));
-    assert_eq!(raw.send(commands::get::<String>("team_id:set")).await.unwrap(), None);
+    assert_eq!(
+        raw.send(commands::get::<String>("team_id:set"))
+            .await
+            .unwrap(),
+        None
+    );
 }
 
 #[rstest]
@@ -301,18 +314,30 @@ async fn pre_call_writes_and_reads_ride_one_pipeline_with_the_cooldown_read(
     let deployment = RedisDeployment::start(topology).await.unwrap();
     let raw = connect(&deployment);
     let (client, trips) = connect_observed(&deployment);
-    let cooldowns = std::sync::Arc::new(RouterCooldowns::new(Some(remote(client.clone())), router_cooldowns::POLICY));
+    let cooldowns = std::sync::Arc::new(RouterCooldowns::new(
+        Some(remote(client.clone())),
+        router_cooldowns::POLICY,
+    ));
     let store = store(Some(client));
     let request = RequestRedis::new(Handle::current(), LONG_DEADLINE);
-    raw.send(commands::set(KEY_OBJECT, "{\"token\": \"t\"}", Duration::from_secs(60)))
-        .await
-        .unwrap();
-    raw.send(commands::set("team_alias:alpha", "\"stale\"", Duration::from_secs(60)))
-        .await
-        .unwrap();
+    raw.send(commands::set(
+        KEY_OBJECT,
+        "{\"token\": \"t\"}",
+        Duration::from_secs(60),
+    ))
+    .await
+    .unwrap();
+    raw.send(commands::set(
+        "team_alias:alpha",
+        "\"stale\"",
+        Duration::from_secs(60),
+    ))
+    .await
+    .unwrap();
 
     let reads = store
-        .get_many(RedisSend::PreCall(&request),
+        .get_many(
+            RedisSend::PreCall(&request),
             &[KEY_OBJECT.to_owned(), "end_user_id:absent".to_owned()],
         )
         .unwrap();
@@ -353,11 +378,18 @@ async fn pre_call_writes_and_reads_ride_one_pipeline_with_the_cooldown_read(
     written.await.unwrap();
     deleted.await.unwrap();
     assert_eq!(
-        raw.send(commands::get::<String>("team_id:t1")).await.unwrap(),
+        raw.send(commands::get::<String>("team_id:t1"))
+            .await
+            .unwrap(),
         Some("{\"team_id\": \"t1\"}".to_owned())
     );
     assert!(within(redis_ttl(&raw, "team_id:t1").await, 60));
-    assert_eq!(raw.send(commands::get::<String>("team_alias:alpha")).await.unwrap(), None);
+    assert_eq!(
+        raw.send(commands::get::<String>("team_alias:alpha"))
+            .await
+            .unwrap(),
+        None
+    );
     assert_eq!(trips.seen().len(), expected.len());
 }
 
@@ -415,7 +447,12 @@ async fn an_eviction_broadcast_drops_only_this_pods_copy_and_the_next_read_refil
     this_pod.delete_local("team_id:t1").unwrap();
 
     assert_eq!(this_pod.get("team_id:t1").await.unwrap(), Some(team("new")));
-    assert!(raw.send(commands::get::<String>("team_id:t1")).await.unwrap().is_some());
+    assert!(
+        raw.send(commands::get::<String>("team_id:t1"))
+            .await
+            .unwrap()
+            .is_some()
+    );
 }
 
 #[rstest]
@@ -434,7 +471,12 @@ async fn delete_drops_memory_and_redis(
         )
         .await
         .unwrap();
-    assert!(raw.send(commands::get::<String>("team_id:t1")).await.unwrap().is_some());
+    assert!(
+        raw.send(commands::get::<String>("team_id:t1"))
+            .await
+            .unwrap()
+            .is_some()
+    );
 
     store.delete(&keys).await.unwrap();
 
@@ -504,7 +546,11 @@ async fn without_redis_every_operation_is_memory_only() {
             .get_many(RedisSend::PreCall(&request), &["team_id:t1".to_owned()])
             .is_none()
     );
-    assert!(store.get_many(RedisSend::Now, &["team_id:t1".to_owned()]).is_none());
+    assert!(
+        store
+            .get_many(RedisSend::Now, &["team_id:t1".to_owned()])
+            .is_none()
+    );
     assert_eq!(
         store
             .increment_if_present("k", Number::Float(1.0))

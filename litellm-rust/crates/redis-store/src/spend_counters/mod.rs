@@ -60,7 +60,10 @@ impl SpendCounters {
     pub async fn read(&self, counter: &SpendCounter) -> Result<Reading, Error> {
         if let Some(client) = self.remote.client() {
             let read = client.send(commands::get::<Vec<u8>>(&counter.key())).await;
-            match read.map_err(Error::from).and_then(|raw| Ok(types::decode(raw)?)) {
+            match read
+                .map_err(Error::from)
+                .and_then(|raw| Ok(types::decode(raw)?))
+            {
                 Ok(value) => return Ok(Reading::Redis(value)),
                 Err(error) => {
                     tracing::debug!(%error, "spend counter Redis read failed, falling back to memory");
@@ -82,12 +85,16 @@ impl SpendCounters {
         let keys: Vec<&str> = keys.iter().map(String::as_str).collect();
         let read = batch.add(commands::mget::<Vec<u8>>(&keys));
         Some(Box::pin(async move {
-            let decoded = read.resolve().await.map_err(Error::from).and_then(|replies| {
-                replies
-                    .into_iter()
-                    .map(|raw| Ok(types::decode(raw)?))
-                    .collect::<Result<Vec<_>, Error>>()
-            });
+            let decoded = read
+                .resolve()
+                .await
+                .map_err(Error::from)
+                .and_then(|replies| {
+                    replies
+                        .into_iter()
+                        .map(|raw| Ok(types::decode(raw)?))
+                        .collect::<Result<Vec<_>, Error>>()
+                });
             Ok(decoded
                 .inspect_err(|error| {
                     tracing::debug!(%error, "spend counter batch read failed, falling back to per-key reads");
@@ -104,7 +111,11 @@ impl SpendCounters {
             return self.increment_local(counter, amount);
         };
         let key = counter.key();
-        let increment = commands::incr_by_float(&key, amount.into(), Some(Expiry::Refresh(remote.default_ttl)));
+        let increment = commands::incr_by_float(
+            &key,
+            amount.into(),
+            Some(Expiry::Refresh(remote.default_ttl)),
+        );
         match remote.client.send(increment).await {
             Ok(total) => {
                 let total = Number::Float(total);
@@ -120,7 +131,10 @@ impl SpendCounters {
 
     /// `run_spend_counter_pipeline`: every increment in one round trip, totals in order. The caller
     /// decides what a failure means for counters whose increment may or may not have landed.
-    pub async fn increment_many(&self, increments: &[(SpendCounter, Number)]) -> Result<Vec<Number>, Error> {
+    pub async fn increment_many(
+        &self,
+        increments: &[(SpendCounter, Number)],
+    ) -> Result<Vec<Number>, Error> {
         let Some(remote) = self.remote.get() else {
             return increments
                 .iter()
@@ -191,36 +205,64 @@ impl SpendCounters {
 
     /// `_repair_stale_spend_counter`: raise memory and Redis to `spend`, never lowering either.
     /// `None` without Redis, else what Redis holds afterwards.
-    pub async fn set_max(&self, counter: &SpendCounter, spend: Number) -> Result<Option<Number>, Error> {
+    pub async fn set_max(
+        &self,
+        counter: &SpendCounter,
+        spend: Number,
+    ) -> Result<Option<Number>, Error> {
         let key = counter.key();
         {
             let _guard = self.memory.guard();
-            if self.memory.get(&key)?.is_none_or(|cached| cached.as_f64() < spend.as_f64()) {
+            if self
+                .memory
+                .get(&key)?
+                .is_none_or(|cached| cached.as_f64() < spend.as_f64())
+            {
                 self.memory.set(&key, spend, None)?;
             }
         }
         let Some(remote) = self.remote.get() else {
             return Ok(None);
         };
-        let args = (to_str(&spend.to_value()), remote.default_ttl.as_secs().to_string());
-        let stored: Option<f64> = remote.client.send(commands::eval_source(SET_MAX, &[&key], args)).await?;
+        let args = (
+            to_str(&spend.to_value()),
+            remote.default_ttl.as_secs().to_string(),
+        );
+        let stored: Option<f64> = remote
+            .client
+            .send(commands::eval_source(SET_MAX, &[&key], args))
+            .await?;
         Ok(stored.map(Number::Float))
     }
 
     /// `SpendCounterReseed.coalesced(_window)`: seed a cold counter with `SET NX` so one pod wins,
     /// answer with whatever the counter holds, and mirror it into memory. Without Redis, memory
     /// keeps the larger of the seed and what it held.
-    pub async fn seed(&self, counter: &SpendCounter, spend: Number, lost: LostSeed) -> Result<Number, Error> {
+    pub async fn seed(
+        &self,
+        counter: &SpendCounter,
+        spend: Number,
+        lost: LostSeed,
+    ) -> Result<Number, Error> {
         let key = counter.key();
-        let Some(Remote { client, default_ttl }) = self.remote.get() else {
+        let Some(Remote {
+            client,
+            default_ttl,
+        }) = self.remote.get()
+        else {
             return Ok(self.memory.update(&key, None, |cached| {
                 Ok(match cached {
-                    Some(cached) if cached.as_f64() > spend.as_f64() => Number::Float(cached.as_f64()),
+                    Some(cached) if cached.as_f64() > spend.as_f64() => {
+                        Number::Float(cached.as_f64())
+                    }
                     _ => spend,
                 })
             })?);
         };
-        let current = if client.send(commands::set_nx(&key, spend.to_json(), *default_ttl)).await? {
+        let current = if client
+            .send(commands::set_nx(&key, spend.to_json(), *default_ttl))
+            .await?
+        {
             spend
         } else {
             match types::decode(client.send(commands::get::<Vec<u8>>(&key)).await?)? {
@@ -243,14 +285,22 @@ impl SpendCounters {
     }
 
     /// A spend reset: memory, then Redis, each for `ttl` or its own default.
-    pub async fn set(&self, counter: &SpendCounter, spend: Number, ttl: Option<Duration>) -> Result<(), Error> {
+    pub async fn set(
+        &self,
+        counter: &SpendCounter,
+        spend: Number,
+        ttl: Option<Duration>,
+    ) -> Result<(), Error> {
         let key = counter.key();
         self.memory.set(&key, spend, ttl)?;
         let Some(remote) = self.remote.get() else {
             return Ok(());
         };
         let ttl = ttl.unwrap_or(remote.default_ttl);
-        remote.client.send(commands::set(&key, spend.to_json(), ttl)).await?;
+        remote
+            .client
+            .send(commands::set(&key, spend.to_json(), ttl))
+            .await?;
         Ok(())
     }
 
@@ -269,14 +319,22 @@ impl SpendCounters {
         let Some(remote) = self.remote.get() else {
             return Ok(false);
         };
-        Ok(remote.client.send(commands::expire(&counter.key(), remote.default_ttl)).await?)
+        Ok(remote
+            .client
+            .send(commands::expire(&counter.key(), remote.default_ttl))
+            .await?)
     }
 
     pub fn get_local(&self, counter: &SpendCounter) -> Result<Option<Number>, Error> {
         Ok(self.memory.get(&counter.key())?)
     }
 
-    pub fn set_local(&self, counter: &SpendCounter, spend: Number, ttl: Option<Duration>) -> Result<(), Error> {
+    pub fn set_local(
+        &self,
+        counter: &SpendCounter,
+        spend: Number,
+        ttl: Option<Duration>,
+    ) -> Result<(), Error> {
         Ok(self.memory.set(&counter.key(), spend, ttl)?)
     }
 
@@ -286,9 +344,11 @@ impl SpendCounters {
 
     /// `DualCache.async_increment_cache(local_only=True)`.
     pub fn increment_local(&self, counter: &SpendCounter, amount: Number) -> Result<Number, Error> {
-        Ok(self.memory.update(&counter.key(), Some(LOCAL_INCREMENT_TTL), |total| {
-            Ok(total.unwrap_or(Number::Int(0)) + amount)
-        })?)
+        Ok(self
+            .memory
+            .update(&counter.key(), Some(LOCAL_INCREMENT_TTL), |total| {
+                Ok(total.unwrap_or(Number::Int(0)) + amount)
+            })?)
     }
 
     pub fn flush_local(&self) -> Result<(), Error> {

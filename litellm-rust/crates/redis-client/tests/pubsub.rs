@@ -4,11 +4,11 @@ use std::time::{Duration, Instant};
 
 use futures_util::StreamExt;
 use litellm_circuit_breaker::{Breaker, Config};
+use litellm_redis_client::commands;
 use litellm_redis_client::{
     Credentials, DEFAULT_TIMEOUT, Error, Namespace, Node, RedisClient, RedisConfig, Sentinel,
     Target, Timeouts,
 };
-use litellm_redis_client::commands;
 use litellm_redis_testing::{RedisDeployment, RedisSentinel, SERVICE_NAME, Topology, eventually};
 use rstest::rstest;
 use support::{connect, connect_guarded};
@@ -36,7 +36,10 @@ async fn delivered(
     payload: &[u8],
 ) {
     eventually(async || {
-        publisher.send(commands::publish(channel, payload)).await.ok()?;
+        publisher
+            .send(commands::publish(channel, payload))
+            .await
+            .ok()?;
         let deadline = tokio::time::Instant::now() + Duration::from_millis(200);
         while let Ok(Some(message)) = tokio::time::timeout_at(deadline, received.recv()).await {
             if message == payload {

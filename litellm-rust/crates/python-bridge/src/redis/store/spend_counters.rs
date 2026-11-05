@@ -21,7 +21,12 @@ fn increments(increments: Vec<(PyData<SpendCounter>, PyNumber)>) -> Vec<(SpendCo
 }
 
 fn numbers(values: Option<Vec<Option<Number>>>) -> Option<Vec<Option<PyNumber>>> {
-    values.map(|values| values.into_iter().map(|value| value.map(PyNumber)).collect())
+    values.map(|values| {
+        values
+            .into_iter()
+            .map(|value| value.map(PyNumber))
+            .collect()
+    })
 }
 
 /// The proxy's spend counters, Redis first with this worker's memory copy behind it.
@@ -45,7 +50,11 @@ impl NativeSpendCounters {
     }
 
     /// `("redis" | "memory", value)`: where the answer came from, a Redis miss included.
-    fn read<'py>(&self, py: Python<'py>, counter: PyData<SpendCounter>) -> PyResult<Bound<'py, PyAny>> {
+    fn read<'py>(
+        &self,
+        py: Python<'py>,
+        counter: PyData<SpendCounter>,
+    ) -> PyResult<Bound<'py, PyAny>> {
         let store = self.0.clone();
         redis_async(py, "async_get_cache", kind_error, async move {
             let reading = store.read(&counter.0).await?;
@@ -56,7 +65,11 @@ impl NativeSpendCounters {
 
     /// One `MGET` on the batch `send` picks; `None` without Redis. It resolves to `None` when the
     /// read failed, so each caller reads on its own.
-    fn read_many(&self, counters: Vec<PyData<SpendCounter>>, send: &NativeSend) -> Option<NativePending> {
+    fn read_many(
+        &self,
+        counters: Vec<PyData<SpendCounter>>,
+        send: &NativeSend,
+    ) -> Option<NativePending> {
         let read = self.0.read_many(send.send(), &unwrap_all(counters))?;
         Some(pending("async_batch_get_cache", kind_error, read, numbers))
     }
@@ -191,7 +204,11 @@ impl NativeSpendCounters {
         self.0.delete_local(&counter.0).map_err(kind_error)
     }
 
-    fn increment_local(&self, counter: PyData<SpendCounter>, amount: PyNumber) -> PyResult<PyNumber> {
+    fn increment_local(
+        &self,
+        counter: PyData<SpendCounter>,
+        amount: PyNumber,
+    ) -> PyResult<PyNumber> {
         self.0
             .increment_local(&counter.0, amount.0)
             .map(PyNumber)

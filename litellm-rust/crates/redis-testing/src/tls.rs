@@ -140,7 +140,9 @@ fn generate() -> Result<Generated, Error> {
 fn encrypt(key: &KeyPair) -> Result<String, pkcs8::Error> {
     let der = key.serialize_der();
     let params = pbes2::Parameters::pbkdf2_sha256_aes256cbc(2048, b"redis-testing-salt", &[7; 16])?;
-    let encrypted =
-        PrivateKeyInfo::try_from(der.as_slice())?.encrypt_with_params(params, CLIENT_KEY_PASSWORD)?;
-    Ok(encrypted.to_pem("ENCRYPTED PRIVATE KEY", LineEnding::LF)?.to_string())
+    let encrypted = PrivateKeyInfo::try_from(der.as_slice())?
+        .encrypt_with_params(params, CLIENT_KEY_PASSWORD)?;
+    Ok(encrypted
+        .to_pem("ENCRYPTED PRIVATE KEY", LineEnding::LF)?
+        .to_string())
 }

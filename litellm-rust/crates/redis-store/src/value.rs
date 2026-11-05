@@ -18,9 +18,10 @@ pub(crate) fn fields<'a, const N: usize>(
     shape: &'static str,
 ) -> Result<&'a [Value; N], DecodeError> {
     match value {
-        Value::Tuple(items) | Value::List(items) => {
-            items.as_slice().try_into().map_err(|_| DecodeError::Shape(shape))
-        }
+        Value::Tuple(items) | Value::List(items) => items
+            .as_slice()
+            .try_into()
+            .map_err(|_| DecodeError::Shape(shape)),
         _ => Err(DecodeError::Shape(shape)),
     }
 }

@@ -57,7 +57,11 @@ fn active_to_py(
 impl NativeRouterCooldowns {
     #[new]
     #[pyo3(signature = (client, redis_ttl_seconds = 60))]
-    fn new(py: Python<'_>, client: Option<PyRef<'_, NativeRedisClient>>, redis_ttl_seconds: u64) -> PyResult<Self> {
+    fn new(
+        py: Python<'_>,
+        client: Option<PyRef<'_, NativeRedisClient>>,
+        redis_ttl_seconds: u64,
+    ) -> PyResult<Self> {
         let remote = client.map(|client| remote(&client, redis_ttl_seconds));
         let policy = router_tier_policies(py)?.cooldowns;
         Ok(Self(Arc::new(RouterCooldowns::new(remote, policy))))
@@ -101,8 +105,16 @@ impl NativeRouterCooldowns {
 
     /// The deployments still cooling down, read on the batch `send` picks.
     fn active(&self, model_ids: Vec<String>, send: &NativeSend) -> PyResult<NativePending> {
-        let active = self.0.active(send.send(), &model_ids).map_err(runtime_error)?;
-        Ok(pending("async_batch_get_cache", runtime_error, active, PyActive))
+        let active = self
+            .0
+            .active(send.send(), &model_ids)
+            .map_err(runtime_error)?;
+        Ok(pending(
+            "async_batch_get_cache",
+            runtime_error,
+            active,
+            PyActive,
+        ))
     }
 
     /// `active` on its own with the GIL released, for the router's sync completion path.
@@ -111,7 +123,10 @@ impl NativeRouterCooldowns {
         py: Python<'py>,
         model_ids: Vec<String>,
     ) -> PyResult<Vec<Bound<'py, PyTuple>>> {
-        let active = self.0.active(Send::Now, &model_ids).map_err(runtime_error)?;
+        let active = self
+            .0
+            .active(Send::Now, &model_ids)
+            .map_err(runtime_error)?;
         let active = redis_sync(py, "batch_get_cache", runtime_error, active)?;
         active_to_py(py, active)
     }

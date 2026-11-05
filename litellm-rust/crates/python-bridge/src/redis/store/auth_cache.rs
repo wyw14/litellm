@@ -5,8 +5,8 @@ use litellm_redis_store::auth_cache::{AuthCache, Settings};
 use pyo3::prelude::*;
 
 use super::{
-    NativePending, PyNumber, kind_error, pending, redis_async, redis_sync, remote, request::NativeSend,
-    ttl, value::PyValue,
+    NativePending, PyNumber, kind_error, pending, redis_async, redis_sync, remote,
+    request::NativeSend, ttl, value::PyValue,
 };
 use crate::redis::client::NativeRedisClient;
 
@@ -98,12 +98,25 @@ impl NativeAuthCache {
             .0
             .declare_set(send.send(), &key, value.0, ttl(ttl_seconds))
             .map_err(kind_error)?;
-        Ok(pending("async_set_cache", kind_error, written, std::convert::identity))
+        Ok(pending(
+            "async_set_cache",
+            kind_error,
+            written,
+            std::convert::identity,
+        ))
     }
 
     fn declare_delete(&self, key: String, send: &NativeSend) -> PyResult<NativePending> {
-        let deleted = self.0.declare_delete(send.send(), &key).map_err(kind_error)?;
-        Ok(pending("async_set_cache", kind_error, deleted, std::convert::identity))
+        let deleted = self
+            .0
+            .declare_delete(send.send(), &key)
+            .map_err(kind_error)?;
+        Ok(pending(
+            "async_set_cache",
+            kind_error,
+            deleted,
+            std::convert::identity,
+        ))
     }
 
     #[pyo3(signature = (entries, ttl_seconds = None))]
@@ -134,8 +147,16 @@ impl NativeAuthCache {
             .into_iter()
             .map(|(key, value, seconds)| (key, value.0, ttl(seconds)))
             .collect();
-        let written = self.0.write_back(send.send(), entries).map_err(kind_error)?;
-        redis_async(py, "async_set_cache_pipeline_with_ttls", kind_error, written)
+        let written = self
+            .0
+            .write_back(send.send(), entries)
+            .map_err(kind_error)?;
+        redis_async(
+            py,
+            "async_set_cache_pipeline_with_ttls",
+            kind_error,
+            written,
+        )
     }
 
     fn delete<'py>(&self, py: Python<'py>, keys: Vec<String>) -> PyResult<Bound<'py, PyAny>> {
@@ -166,12 +187,9 @@ impl NativeAuthCache {
         amount: PyNumber,
     ) -> PyResult<Bound<'py, PyAny>> {
         let store = self.0.clone();
-        redis_async(
-            py,
-            "async_increment_if_present",
-            kind_error,
-            async move { store.increment_if_present(&key, amount.0).await },
-        )
+        redis_async(py, "async_increment_if_present", kind_error, async move {
+            store.increment_if_present(&key, amount.0).await
+        })
     }
 
     fn get_local(&self, key: &str) -> PyResult<Option<PyValue>> {
