@@ -12,22 +12,16 @@ use crate::{
     remote::RemoteSlot,
 };
 
-/// How a read-through family uses its memory tier, declared once by the family.
+/// `InMemoryCache`'s default TTL, which a value read from Redis keeps in memory.
+const BACKFILL_TTL: Duration = Duration::from_secs(600);
+
+/// How a read-through family throttles its Redis reads, as the host configures it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct TierPolicy {
     /// Python's `redis_batch_cache_expiry`: a key memory misses is read from Redis at most this often.
     pub refresh_after: Duration,
-    /// How long a value read from Redis stays in memory.
-    pub backfill_ttl: Duration,
-    pub on_breaker_open: OnBreakerOpen,
     /// Python's `default_max_redis_batch_cache_size`: how many keys the refresh throttle tracks.
     pub tracked_reads: usize,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum OnBreakerOpen {
-    /// Serve what memory holds and let the next read try Redis again.
-    ServeMemory,
 }
 
 /// The memory tier in front of Redis that a read-through family builds for itself, as Python's
@@ -157,8 +151,7 @@ impl<V: Clone + Send + Sync + 'static> MemoryTier<V> {
 
     fn backfill(&self, key: &str, value: Option<V>) -> Result<Option<V>, Error> {
         if let Some(value) = &value {
-            self.memory
-                .set(key, value.clone(), Some(self.policy.backfill_ttl))?;
+            self.memory.set(key, value.clone(), Some(BACKFILL_TTL))?;
         }
         Ok(value)
     }

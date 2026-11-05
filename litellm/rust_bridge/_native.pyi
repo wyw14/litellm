@@ -37,9 +37,12 @@ class NativeRedisClient:
     def connect(
         redis_kwargs: Mapping[str, object],
         *,
+        default_ttl_seconds: float,
         namespace: str | None = None,
         breaker: tuple[int, float, float] | None = None,
     ) -> NativeRedisClient | None: ...
+    @property
+    def default_ttl_seconds(self) -> float: ...
 
 @final
 class NativeRequestRedis:

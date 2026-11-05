@@ -69,11 +69,10 @@ fn ttl(seconds: Option<f64>) -> Option<Duration> {
     seconds.map(|seconds| Duration::from_secs_f64(seconds.max(0.0)))
 }
 
-/// A store's Redis with the `RedisCache.default_ttl` Python attached it with.
-fn remote(client: &NativeRedisClient, redis_ttl_seconds: u64) -> Remote {
+fn remote(client: &NativeRedisClient) -> Remote {
     Remote {
-        client: client.0.clone(),
-        default_ttl: Duration::from_secs(redis_ttl_seconds),
+        client: client.client.clone(),
+        default_ttl: client.default_ttl,
     }
 }
 
