@@ -3,9 +3,10 @@ import uuid
 from concurrent.futures import ThreadPoolExecutor
 from typing import Final
 
+import pytest
 
 from litellm.caching.redis_cache import RedisCache
-from litellm.redis.stores._connection import native_client
+from litellm.redis.stores.connection import connect
 from litellm.rust_bridge._native import NativeRedisClient, native_redis_breaker_states
 
 
@@ -17,6 +18,7 @@ def test_concurrent_first_connects_share_one_client_without_deadlocking() -> Non
         pool.submit(
             NativeRedisClient.connect,
             {"host": "127.0.0.1", "port": 1},
+            default_ttl_seconds=60,
             namespace=namespace,
             breaker=(5, 60.0, 5.0),
         )
@@ -32,7 +34,9 @@ def test_concurrent_first_connects_share_one_client_without_deadlocking() -> Non
 
 
 def _breaker_states_while_connected(namespace: str) -> int:
-    client: Final = NativeRedisClient.connect({"host": "127.0.0.1", "port": 1}, namespace=namespace)
+    client: Final = NativeRedisClient.connect(
+        {"host": "127.0.0.1", "port": 1}, default_ttl_seconds=60, namespace=namespace
+    )
     assert client is not None
     return len(native_redis_breaker_states())
 
@@ -49,13 +53,13 @@ def test_a_discarded_client_leaves_the_process_registry(monkeypatch: pytest.Monk
     assert len(native_redis_breaker_states()) == before
 
 
-def test_a_redis_cache_captures_what_native_stores_need_at_construction() -> None:
+def test_a_redis_cache_captures_what_connect_needs_at_construction() -> None:
     cache: Final = RedisCache(host="127.0.0.1", port=1, namespace="ns", socket_timeout=0.2)
 
-    assert cache.native_settings is not None
-    assert dict(cache.native_settings.redis_kwargs) == {"host": "127.0.0.1", "port": 1, "socket_timeout": 0.2}
-    assert cache.native_settings.namespace == "ns"
-    assert cache.native_settings.default_ttl == cache.default_ttl
+    assert cache.store_settings is not None
+    assert dict(cache.store_settings.redis_kwargs) == {"host": "127.0.0.1", "port": 1, "socket_timeout": 0.2}
+    assert cache.store_settings.namespace == "ns"
+    assert cache.store_settings.default_ttl == cache.default_ttl
 
 
 class _UnbuiltRedisCache(RedisCache):
@@ -63,5 +67,9 @@ class _UnbuiltRedisCache(RedisCache):
         pass
 
 
-def test_a_redis_cache_stand_in_that_skips_the_constructor_leaves_native_stores_on_memory() -> None:
-    assert native_client(_UnbuiltRedisCache().native_settings) is None
+def test_a_redis_cache_stand_in_that_skips_the_constructor_connects_nothing() -> None:
+    assert connect(_UnbuiltRedisCache()) is None
+
+
+def test_no_redis_cache_connects_nothing() -> None:
+    assert connect(None) is None

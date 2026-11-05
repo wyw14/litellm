@@ -191,20 +191,35 @@ fn shared_client(
 /// The Rust client for one `RedisCache`, built once and handed to every native store, so a store
 /// never sees the redis-py kwargs or the namespace.
 #[pyclass(frozen, name = "NativeRedisClient")]
-pub(crate) struct NativeRedisClient(pub(crate) RedisClient);
+pub(crate) struct NativeRedisClient {
+    pub(crate) client: RedisClient,
+    /// `RedisCache.default_ttl`, the TTL a store's write takes when its caller gives none.
+    pub(crate) default_ttl: Duration,
+}
 
 #[pymethods]
 impl NativeRedisClient {
     /// `None` when Redis is not usable, which leaves every store given it on memory.
     #[staticmethod]
-    #[pyo3(signature = (redis_kwargs, *, namespace = None, breaker = None))]
+    #[pyo3(signature = (redis_kwargs, *, default_ttl_seconds, namespace = None, breaker = None))]
     fn connect(
         py: Python<'_>,
         redis_kwargs: RedisSpec,
+        default_ttl_seconds: f64,
         namespace: Option<String>,
         breaker: Option<RedisBreaker>,
     ) -> PyResult<Option<Self>> {
-        Ok(shared_client(py, redis_kwargs, namespace, breaker)?.map(Self))
+        Ok(
+            shared_client(py, redis_kwargs, namespace, breaker)?.map(|client| Self {
+                client,
+                default_ttl: Duration::from_secs_f64(default_ttl_seconds.max(0.0)),
+            }),
+        )
+    }
+
+    #[getter]
+    fn default_ttl_seconds(&self) -> f64 {
+        self.default_ttl.as_secs_f64()
     }
 }
 
