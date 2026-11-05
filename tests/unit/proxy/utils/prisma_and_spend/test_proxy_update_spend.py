@@ -1,226 +1,22 @@
 """Pin ``ProxyUpdateSpend`` behavior.
 
 Symbols pinned here:
-  - ``ProxyUpdateSpend.update_end_user_spend``
   - ``ProxyUpdateSpend.update_spend_logs``
   - ``ProxyUpdateSpend.disable_spend_updates``
 """
 
 from __future__ import annotations
 
-import asyncio
 import json
-from collections.abc import Callable, Iterator
-from typing import Any, Dict, Final, List
+from collections.abc import Callable
+from typing import Any, Final
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
 import litellm.proxy.utils as utils_mod
 from litellm.proxy.db.spend_log_batching import spend_log_row_bytes
-from litellm.proxy.utils import PrismaClient, ProxyUpdateSpend, enqueue_spend_logs
-
-
-@pytest.fixture(autouse=True)
-def reset_spend_log_queue_bytes() -> Iterator[None]:
-    PrismaClient.spend_log_queue_bytes = 0
-    yield
-    PrismaClient.spend_log_queue_bytes = 0
-
-
-class _AsyncCM:
-    def __init__(self, target: Any) -> None:
-        self.target = target
-
-    async def __aenter__(self) -> Any:
-        return self.target
-
-    async def __aexit__(self, *exc: Any) -> None:
-        return None
-
-
-@pytest.mark.asyncio
-async def test_update_end_user_spend_upserts_each_end_user(
-    mock_prisma_client: Any,
-) -> None:
-    batcher = MagicMock()
-    batcher.litellm_endusertable.upsert = MagicMock()
-    transaction = MagicMock()
-    transaction.batch_ = lambda: _AsyncCM(batcher)
-    mock_prisma_client.db.tx = lambda timeout: _AsyncCM(transaction)
-
-    proxy_logging = MagicMock()
-    proxy_logging.failure_handler = AsyncMock()
-
-    end_user_costs: Dict[str, float] = {"u_b": 1.0, "u_a": 0.5}
-    await ProxyUpdateSpend.update_end_user_spend(
-        n_retry_times=0,
-        prisma_client=mock_prisma_client,
-        proxy_logging_obj=proxy_logging,
-        end_user_list_transactions=end_user_costs,
-    )
-    calls = batcher.litellm_endusertable.upsert.call_args_list
-    ordered_ids = [c.kwargs["where"]["user_id"] for c in calls]
-    creates = [c.kwargs["data"]["create"] for c in calls]
-    pinned = {
-        "upsert_count": len(calls),
-        "ordered_ids": ordered_ids,
-        "first_create_keys": sorted(creates[0].keys()),
-        "first_create_user_id": creates[0]["user_id"],
-        "first_create_spend": creates[0]["spend"],
-    }
-    assert pinned == {
-        "upsert_count": 2,
-        "ordered_ids": ["u_a", "u_b"],
-        "first_create_keys": sorted(["user_id", "spend", "blocked"]),
-        "first_create_user_id": "u_a",
-        "first_create_spend": 0.5,
-    }
-
-
-@pytest.mark.asyncio
-async def test_update_end_user_spend_retries_on_connect_error(
-    mock_prisma_client: Any, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """``DB_RETRY_SAFE_ERROR_TYPES`` (ConnectError, statements provably never
-    sent) retries with jittered backoff; once retries are exhausted the
-    original exception bubbles up via ``_raise_failed_update_spend_exception``.
-    """
-    import httpx
-    import litellm.proxy.utils as utils_mod
-
-    sleeps: list[float] = []
-
-    async def _fake_sleep(seconds: float) -> None:
-        sleeps.append(seconds)
-
-    monkeypatch.setattr(utils_mod.asyncio, "sleep", _fake_sleep)
-
-    err = httpx.ConnectError("down")
-    mock_prisma_client.db.tx = MagicMock(side_effect=err)
-    proxy_logging = MagicMock()
-    proxy_logging.failure_handler = AsyncMock()
-    with pytest.raises(httpx.ConnectError):
-        await ProxyUpdateSpend.update_end_user_spend(
-            n_retry_times=1,
-            prisma_client=mock_prisma_client,
-            proxy_logging_obj=proxy_logging,
-            end_user_list_transactions={"u": 1.0},
-        )
-    assert len(sleeps) == 1
-    assert 1.0 <= sleeps[0] <= 2.0
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize("ambiguous_error_name", ["ReadTimeout", "ReadError"])
-async def test_update_end_user_spend_does_not_retry_post_send_ambiguous_errors(
-    mock_prisma_client: Any, ambiguous_error_name: str
-) -> None:
-    """Post-send errors are ambiguous and retrying can double-apply increments
-    (see DB_RETRY_SAFE_ERROR_TYPES); they must raise on the first attempt."""
-    import httpx
-
-    err = getattr(httpx, ambiguous_error_name)("ambiguous")
-    mock_prisma_client.db.tx = MagicMock(side_effect=err)
-    proxy_logging = MagicMock()
-    proxy_logging.failure_handler = AsyncMock()
-    with pytest.raises((httpx.ReadTimeout, httpx.ReadError)):
-        await ProxyUpdateSpend.update_end_user_spend(
-            n_retry_times=3,
-            prisma_client=mock_prisma_client,
-            proxy_logging_obj=proxy_logging,
-            end_user_list_transactions={"u": 1.0},
-        )
-    mock_prisma_client.db.tx.assert_called_once()
-
-
-@pytest.mark.asyncio
-async def test_update_end_user_spend_non_connection_error_raises_immediately(
-    mock_prisma_client: Any,
-) -> None:
-    mock_prisma_client.db.tx = MagicMock(side_effect=RuntimeError("unknown"))
-    proxy_logging = MagicMock()
-    proxy_logging.failure_handler = AsyncMock()
-    with pytest.raises(RuntimeError, match="unknown"):
-        await ProxyUpdateSpend.update_end_user_spend(
-            n_retry_times=3,
-            prisma_client=mock_prisma_client,
-            proxy_logging_obj=proxy_logging,
-            end_user_list_transactions={"u": 1.0},
-        )
-
-
-def _end_user_deadlock_error() -> Exception:
-    from prisma.errors import RawQueryError
-
-    return RawQueryError(data={"user_facing_error": {"error_code": "P2034", "meta": {"table": "LiteLLM_EndUserTable"}}})
-
-
-def _failing_tx(error: Exception) -> Any:
-    tx = MagicMock()
-    tx.__aenter__ = AsyncMock(side_effect=error)
-    tx.__aexit__ = AsyncMock(return_value=False)
-    return tx
-
-
-@pytest.mark.asyncio
-async def test_update_end_user_spend_retries_on_deadlock_then_commits(
-    mock_prisma_client: Any, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """Regression for #27989: a Postgres deadlock (P2034/40P01) on the end-user
-    spend batch is retried with jittered backoff and the increments land,
-    instead of raising immediately and dropping the flushed spend."""
-    sleeps: list[float] = []
-
-    async def _fake_sleep(seconds: float) -> None:
-        sleeps.append(seconds)
-
-    monkeypatch.setattr(asyncio, "sleep", _fake_sleep)
-
-    batcher = MagicMock()
-    batcher.litellm_endusertable.upsert = MagicMock()
-    transaction = MagicMock()
-    transaction.batch_ = lambda: _AsyncCM(batcher)
-    mock_prisma_client.db.tx = MagicMock(side_effect=[_failing_tx(_end_user_deadlock_error()), _AsyncCM(transaction)])
-
-    proxy_logging = MagicMock()
-    proxy_logging.failure_handler = AsyncMock()
-
-    await ProxyUpdateSpend.update_end_user_spend(
-        n_retry_times=3,
-        prisma_client=mock_prisma_client,
-        proxy_logging_obj=proxy_logging,
-        end_user_list_transactions={"end-user-1": 0.25},
-    )
-
-    assert mock_prisma_client.db.tx.call_count == 2
-    batcher.litellm_endusertable.upsert.assert_called_once()
-    assert batcher.litellm_endusertable.upsert.call_args.kwargs["where"] == {"user_id": "end-user-1"}
-    assert len(sleeps) == 1
-    assert 1.0 <= sleeps[0] <= 2.0
-    proxy_logging.failure_handler.assert_not_called()
-
-
-@pytest.mark.asyncio
-async def test_update_end_user_spend_raises_after_exhausting_deadlock_retries(
-    mock_prisma_client: Any, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    from prisma.errors import RawQueryError
-
-    monkeypatch.setattr(asyncio, "sleep", AsyncMock(return_value=None))
-    mock_prisma_client.db.tx = MagicMock(side_effect=lambda timeout: _failing_tx(_end_user_deadlock_error()))
-    proxy_logging = MagicMock()
-    proxy_logging.failure_handler = AsyncMock()
-
-    with pytest.raises(RawQueryError):
-        await ProxyUpdateSpend.update_end_user_spend(
-            n_retry_times=2,
-            prisma_client=mock_prisma_client,
-            proxy_logging_obj=proxy_logging,
-            end_user_list_transactions={"end-user-1": 0.25},
-        )
-
-    assert mock_prisma_client.db.tx.call_count == 3
+from litellm.proxy.utils import ProxyUpdateSpend, enqueue_spend_logs
 
 
 @pytest.mark.asyncio
@@ -351,6 +147,7 @@ async def test_update_spend_logs_failure_raises_after_retries(
     via ``_raise_failed_update_spend_exception``.
     """
     import httpx
+
     import litellm.proxy.utils as utils_mod
 
     async def _fake_sleep(_: float) -> None:
@@ -388,7 +185,7 @@ async def test_update_spend_logs_isolates_poison_row_and_persists_good_rows(
     write raises and the entire batch is lost.
     """
     poison_id = "r1"
-    written: List[str] = []
+    written: list[str] = []
 
     async def _create_many(*, data: Any, skip_duplicates: bool) -> None:
         ids = [row["request_id"] for row in data]
@@ -744,7 +541,7 @@ async def test_row_budget_costs_at_most_one_extra_attempt_per_statement(
 
 async def _flush_and_count_create_many(
     mock_prisma_client: Any,
-    logs: List[Any],
+    logs: list[Any],
     max_bytes: int,
     poison: bool,
     monkeypatch: pytest.MonkeyPatch,
@@ -821,7 +618,7 @@ async def test_clean_statement_is_still_written_after_a_poison_flood(
     # the assertion cannot pass by riding along with a poisoned one.
     lone_blob = json.dumps({"content": "x" * 300_000})
     clean = [make_spend_log_row(request_id="good", messages=lone_blob, response=lone_blob)]
-    written: List[str] = []
+    written: list[str] = []
 
     async def _create_many(*, data: Any, skip_duplicates: bool) -> None:
         ids = [row["request_id"] for row in data]
@@ -922,7 +719,7 @@ async def test_update_spend_logs_parks_failed_batch_in_redis_with_wire_safe_date
 @pytest.mark.asyncio
 async def test_update_spend_logs_requeues_batch_when_postgres_is_out_of_connections(
     mock_prisma_client: MagicMock,
-    make_spend_log_row: Callable[..., Dict[str, Any]],
+    make_spend_log_row: Callable[..., dict[str, Any]],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Postgres refusing the pool a new connection (SQLSTATE 53300, "too many

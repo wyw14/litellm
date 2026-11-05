@@ -138,6 +138,7 @@ from litellm import (
 from litellm._internal_context import service_target
 from litellm._logging import redact_string, verbose_proxy_logger
 from litellm._service_logger import ServiceLogging, ServiceTypes
+from litellm.accounting.payload import charge_kind, spend_log_columns
 from litellm.caching.caching import DualCache, RedisCache
 from litellm.caching.dual_cache import LimitedSizeOrderedDict
 from litellm.caching.in_memory_cache import InMemoryCache
@@ -366,11 +367,6 @@ class _EndUserBatchTable(Protocol):
     def upsert(self, *, where: Mapping[str, object], data: Mapping[str, object]) -> None: ...
 
 
-class _EndUserSpendBatch(Protocol):
-    @property
-    def litellm_endusertable(self) -> _EndUserBatchTable: ...
-
-
 class _BatchUpdateTable(Protocol):
     def update(self, *, where: Mapping[str, object], data: Mapping[str, object]) -> None: ...
 
@@ -423,16 +419,6 @@ def _team_member_for_user(row: _TeamMembershipRow) -> Member | None:
         if member.get("user_id") is not None and user_id == member.get("user_id")
     ]
     return matches[-1] if matches else None
-
-
-class _EndUserSpendTransaction(Protocol):
-    def batch_(self) -> contextlib.AbstractAsyncContextManager[_EndUserSpendBatch]: ...
-
-
-def _end_user_spend_transaction(
-    db: PrismaWrapper | RoutingPrismaWrapper, timeout: timedelta
-) -> contextlib.AbstractAsyncContextManager[_EndUserSpendTransaction]:
-    return db.tx(timeout=timeout)
 
 
 unified_guardrail: Final = UnifiedLLMGuardrails()
@@ -8476,55 +8462,6 @@ async def dequeue_spend_logs(prisma_client: PrismaClient, limit: int) -> list[di
 
 class ProxyUpdateSpend:
     @staticmethod
-    async def update_end_user_spend(
-        n_retry_times: int,
-        prisma_client: PrismaClient,
-        proxy_logging_obj: ProxyLogging,
-        end_user_list_transactions: dict[str, float],
-        outer_transaction: _EndUserSpendTransaction | None = None,
-    ):
-        for i in range(n_retry_times + 1):
-            start_time = time.time()
-            try:
-                async with (
-                    db_span("update_end_user_spend", "LiteLLM_EndUserTable"),
-                    (
-                        contextlib.nullcontext(outer_transaction)
-                        if outer_transaction is not None
-                        else _end_user_spend_transaction(prisma_client.db, timedelta(seconds=60))
-                    ) as transaction,
-                ):
-                    batcher: _EndUserSpendBatch
-                    async with transaction.batch_() as batcher:
-                        # Sort by end_user_id for consistent lock ordering across pods to prevent deadlocks.
-                        for end_user_id, response_cost in sorted(end_user_list_transactions.items()):
-                            if litellm.max_end_user_budget is not None:
-                                pass
-                            batcher.litellm_endusertable.upsert(
-                                where={"user_id": end_user_id},
-                                data={
-                                    "create": {
-                                        "user_id": end_user_id,
-                                        "spend": response_cost,
-                                        "blocked": False,
-                                    },
-                                    "update": {"spend": {"increment": response_cost}},
-                                },
-                            )
-
-                break
-            except Exception as e:
-                if outer_transaction is not None:
-                    raise
-                await DBSpendUpdateWriter.handle_spend_update_failure(
-                    e=e,
-                    attempt=i,
-                    n_retry_times=n_retry_times,
-                    start_time=start_time,
-                    proxy_logging_obj=proxy_logging_obj,
-                )
-
-    @staticmethod
     async def update_spend_logs(
         n_retry_times: int,
         prisma_client: PrismaClient,
@@ -8645,15 +8582,7 @@ class ProxyUpdateSpend:
 
 
 def _spend_log_export_rows(rows: Sequence[Mapping[str, object]]) -> tuple[Mapping[str, object], ...]:
-    return tuple(
-        {
-            key: value
-            for key, value in row.items()
-            if key not in {"accounting_payload", "accounting_log_disabled", "accounting_delivery_id"}
-        }
-        for row in rows
-        if row.get("accounting_log_disabled") is not True
-    )
+    return tuple(spend_log_columns(row) for row in rows if row.get("accounting_log_disabled") is not True)
 
 
 async def _commit_export_accounting(
@@ -8662,7 +8591,7 @@ async def _commit_export_accounting(
     if base_url is None:
         return
     await SpendLogsRepository(prisma_client).insert_with_deliveries(
-        tuple(row for row in rows if "accounting_payload" in row), write_spend_logs=False
+        tuple(row for row in rows if charge_kind(row) != "log_only"), write_spend_logs=False
     )
 
 
@@ -9088,7 +9017,7 @@ _ACCOUNTING_ONLY_KEYS: Final = frozenset({"request_id", "call_type", "accounting
 
 
 def _carries_a_charge(row: Mapping[str, object]) -> bool:
-    return "accounting_payload" in row
+    return charge_kind(row) != "log_only"
 
 
 def accounting_only_spend_log(row: Mapping[str, object]) -> Mapping[str, object]:

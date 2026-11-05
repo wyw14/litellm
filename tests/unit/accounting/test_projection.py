@@ -7,7 +7,9 @@ import pytest
 from pydantic import TypeAdapter
 
 import litellm
-from litellm.accounting.projection import project
+from litellm.accounting.payload import AccountingPayload
+from litellm.accounting.projection import Contribution
+from litellm.accounting.projection import project as project_payload
 from litellm.accounting.snapshot import build_accounting_payload
 from litellm.constants import BILLED_RETRY_ATTEMPT_METADATA_KEY, INTERNAL_CALL_ORIGIN_METADATA_KEY
 from litellm.proxy._types import SpendLogsPayload
@@ -19,6 +21,10 @@ from litellm.types.utils import BACKGROUND_RESPONSE_COST_POLL_CALL_ORIGIN, Model
 
 _NOW: Final = datetime(2026, 11, 2, tzinfo=timezone.utc)
 _FIELDS: Final = TypeAdapter(dict[str, object])
+
+
+def project(row: object) -> tuple[Contribution, ...]:
+    return project_payload(AccountingPayload.model_validate(row))
 
 
 @pytest.mark.parametrize("status", ["success", "failure"])
@@ -56,7 +62,7 @@ async def test_daily_projection_counts_requests_only_for_the_caller(
         windows=(),
         router=lambda: None,
     )
-    restored: Final = _FIELDS.validate_json(json.dumps(accounting, default=str))
+    restored: Final = accounting
     stored_daily: Final = next(item for item in project(restored) if item.table == "LiteLLM_DailyUserSpend")
     caller: Final = origin is None
     timed: Final = origin != "auto_router" and status == "success"
@@ -297,19 +303,6 @@ def test_guardrail_projection_skips_unmeasured_counters() -> None:
     assert dict(units[0].increments) == {"units": 2, "cost": 0.0, "untracked_units": 2}
 
 
-def test_lean_row_without_model_does_not_fabricate_daily_entity_usage() -> None:
-    projected: Final = project(
-        {
-            "request_id": "lean",
-            "api_key": "key",
-            "startTime": _NOW,
-            "spend": 0.5,
-            "metadata": {"accounting_entities": {"api_key": "key"}},
-        }
-    )
-    assert tuple(item.table for item in projected) == ("LiteLLM_VerificationToken", "LiteLLM_DailyModelUsage")
-
-
 @pytest.mark.parametrize(
     "cost_fields",
     [
@@ -489,7 +482,7 @@ def test_stored_payload_keeps_guardrail_billing_but_not_guardrail_content() -> N
     accounting: Final = build_accounting_payload(
         accounting_input, entities={"api_key": "key"}, model_access_groups=(), windows=(), router=lambda: None
     )
-    stored: Final = json.dumps(accounting, default=str)
+    stored: Final = accounting.model_dump_json(by_alias=True)
     restored: Final = _FIELDS.validate_json(stored)
     usage_rows: Final = tuple(item for item in project(restored) if item.table == "LiteLLM_DailyGuardrailUsageUnits")
     assert "4111" not in stored
@@ -530,17 +523,16 @@ def test_caller_supplied_savings_beyond_json_range_are_clamped_and_never_drop_th
     accounting: Final = build_accounting_payload(
         payload, entities={"api_key": "key"}, model_access_groups=(), windows=(), router=lambda: None
     )
-    restored: Final = _FIELDS.validate_json(json.dumps(accounting, default=str))
-    assert dict(restored["metadata"])["accounting_savings"]["compression"] == 0.0
-    assert dict(restored["metadata"])["compression_savings"] == {"tokens_saved": 2**53 - 1}
-    assert dict(restored["metadata"])["compression_savings"] == {"tokens_saved": 2**53 - 1}
+    restored: Final = accounting
+    assert restored.metadata.savings.compression == 0.0
+    assert restored.metadata.compression_savings == {"tokens_saved": 2**53 - 1}
     assert [
         dict(item.increments)["spend"] for item in project(restored) if item.table == "LiteLLM_VerificationToken"
     ] == [0.5]
 
 
 def _guarded_row(
-    request_id: str | None,
+    request_id: str,
     usage: Mapping[str, object],
     *,
     team_id: str | None = "team-a",
@@ -565,11 +557,10 @@ def _guarded_row(
 
 def _guardrail_unit_rows(*rows: Mapping[str, object]) -> Mapping[tuple[str, ...], Mapping[str, int | float]]:
     from litellm.accounting.delivery_projection import project_deliveries
-    from litellm.repositories.accounting_delivery_repository import DeliveryProjection
 
     return {
         tuple(value for _, value in item.key): dict(item.increments)
-        for item in project_deliveries(DeliveryProjection(row) for row in rows)
+        for item in project_deliveries(AccountingPayload.model_validate(row) for row in rows)
         if item.table == "LiteLLM_DailyGuardrailUsageUnits"
     }
 
@@ -580,7 +571,7 @@ def test_guardrail_units_sum_per_guardrail_team_key_and_date_whatever_the_verdic
         _guarded_row("r1", {"topicPolicyUnits": 1, "contentPolicyUnits": 1}),
         _guarded_row("r2", {"topicPolicyUnits": 1, "contentPolicyUnits": 2}, status="guardrail_intervened"),
         _guarded_row("r3", {"topicPolicyUnits": 1}, team_id=None, api_key="hashed-key-2"),
-        _guarded_row(None, {"topicPolicyUnits": 9}),
+        _guarded_row("", {"topicPolicyUnits": 9}),
     )
 
     assert {key: counters["units"] for key, counters in rows.items()} == {
@@ -681,11 +672,7 @@ def _daily_user_row(payload: Mapping[str, object], status: str) -> Mapping[str, 
         windows=(),
         router=lambda: None,
     )
-    daily: Final = next(
-        item
-        for item in project(_FIELDS.validate_json(json.dumps(accounting, default=str)))
-        if item.table == "LiteLLM_DailyUserSpend"
-    )
+    daily: Final = next(item for item in project(accounting) if item.table == "LiteLLM_DailyUserSpend")
     return {**dict(daily.key), **dict(daily.increments)}
 
 

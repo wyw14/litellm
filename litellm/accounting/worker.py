@@ -10,11 +10,12 @@ from typing import (
 
 from litellm._logging import verbose_proxy_logger
 from litellm.accounting.application import apply_deliveries
+from litellm.accounting.entity_spend import invalidate_entity_caches
 from litellm.accounting.metrics import record_deliveries
+from litellm.accounting.payload import AccountingPayload
 from litellm.accounting.projection import Contribution
 from litellm.repositories.accounting_delivery_repository import (
     AccountingDeliveryRepository,
-    DeliveryProjection,
     LedgerDatabase,
     LedgerTransaction,
 )
@@ -42,10 +43,10 @@ async def flush_accounting_deliveries(
         return
     applied: tuple[Contribution, ...] = ()  # rebind-ok: keep committed contributions for cache invalidation
 
-    async def apply(transaction: LedgerTransaction, deliveries: tuple[DeliveryProjection, ...]) -> None:
+    async def apply(transaction: LedgerTransaction, deliveries: tuple[AccountingPayload, ...]) -> None:
         nonlocal applied
         applied = await apply_deliveries(  # rebind-ok: invalidate caches only after the outer transaction commits
-            transaction, deliveries, prisma_client=prisma_client, writer=writer, proxy_logging_obj=proxy_logging_obj
+            transaction, deliveries, prisma_client=prisma_client
         )
 
     try:
@@ -59,7 +60,7 @@ async def flush_accounting_deliveries(
         async def run_batch(*, retry_only: bool) -> bool:
             result: Final = await repository.apply_pending(apply, batch_size=batch_size, retry_only=retry_only)
             if result.applied:
-                await writer.invalidate_accounting_entities(applied, proxy_logging_obj)
+                await invalidate_entity_caches(applied, proxy_logging_obj)
             if result.parked:
                 verbose_proxy_logger.error(
                     "Accounting delivery parked %d requests after isolated failures", len(result.parked)

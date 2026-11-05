@@ -4,6 +4,7 @@ import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
+from litellm.accounting.payload import AccountingPayload
 from litellm.accounting.projection import project
 from litellm.proxy._types import LitellmUserRoles, UserAPIKeyAuth
 from litellm.proxy.auth.user_api_key_auth import user_api_key_auth
@@ -257,7 +258,7 @@ async def test_model_insights_reads_back_what_the_rollup_wrote() -> None:
 
     async with prisma.db.batch_() as batcher:
         for row in (payload, {**payload, "request_tags": []}):
-            for item in project(row):
+            for item in project(AccountingPayload.model_validate(row)):
                 if item.table == "LiteLLM_DailyModelUsage":
                     queue_model_usage_upsert(batcher, dict(item.key), dict(item.increments))
 

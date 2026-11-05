@@ -5,6 +5,7 @@ from typing import TYPE_CHECKING, Final
 from pydantic import TypeAdapter, ValidationError
 
 from litellm._logging import verbose_proxy_logger
+from litellm.accounting.payload import AccountingPayload
 from litellm.litellm_core_utils.safe_json_dumps import safe_json_structure
 from litellm.proxy._types import SpendLogsPayload
 from litellm.proxy.spend_tracking.compression_savings import extract_compression_saved_tokens
@@ -66,7 +67,7 @@ def build_accounting_payload(
     model_access_groups: Sequence[str],
     windows: Sequence[Mapping[str, object]],
     router: "Callable[[], Router | None]",
-) -> Mapping[str, object]:
+) -> AccountingPayload:
     metadata: Final = _FIELDS.validate_json(payload["metadata"])
     savings: Final = _savings_or_zero(payload, metadata, router)
     accounting_metadata: Final = {
@@ -76,7 +77,7 @@ def build_accounting_payload(
         "accounting_model_access_groups": model_access_groups,
         "accounting_windows": windows,
     }
-    return _FIELDS.validate_python(
+    return AccountingPayload.model_validate(
         safe_json_structure(
             {
                 **{

@@ -14,6 +14,7 @@ from typing import TYPE_CHECKING, Any, Final, Generic
 
 from pydantic import TypeAdapter
 
+from litellm.accounting.payload import charge_kind, spend_log_columns
 from litellm.litellm_core_utils.safe_json_dumps import safe_dumps
 from litellm.repositories.accounting_delivery_repository import LedgerDatabase, LedgerTransaction
 from litellm.repositories.prisma_protocols import RowT_co, TableActions
@@ -96,16 +97,12 @@ def _accounting_payload(value: object) -> Mapping[str, object]:
     )
 
 
-_ACCOUNTING_ONLY_FIELDS: Final = frozenset({"accounting_payload", "accounting_log_disabled", "accounting_delivery_id"})
-
-
 def _settles_once(row: Mapping[str, object]) -> bool:
-    """A batch or video cost row: update_database gives every other ledger row its own delivery id."""
-    return "accounting_delivery_id" not in row
+    return charge_kind(row) == "job"
 
 
 def _delivery_id(row: Mapping[str, object]) -> str:
-    return str(row["accounting_delivery_id"]) if not _settles_once(row) else str(row["request_id"])
+    return str(row["request_id"]) if _settles_once(row) else str(row["accounting_delivery_id"])
 
 
 class SpendLogsRepository(PrismaTableRepository["prisma_models.LiteLLM_SpendLogs"]):
@@ -114,11 +111,11 @@ class SpendLogsRepository(PrismaTableRepository["prisma_models.LiteLLM_SpendLogs
     async def insert_with_deliveries(
         self, rows: Sequence[Mapping[str, object]], *, write_spend_logs: bool = True
     ) -> int:
-        legacy: Final = tuple(row for row in rows if "accounting_payload" not in row)
+        legacy: Final = tuple(row for row in rows if charge_kind(row) == "log_only")
         legacy_count: Final = await self.table.create_many(data=legacy, skip_duplicates=True) if legacy else 0
         ledger: Final = tuple(
             sorted(
-                {_delivery_id(row): row for row in reversed(rows) if "accounting_payload" in row}.values(),
+                {_delivery_id(row): row for row in reversed(rows) if charge_kind(row) != "log_only"}.values(),
                 key=_delivery_id,
             )
         )
@@ -163,7 +160,7 @@ class SpendLogsRepository(PrismaTableRepository["prisma_models.LiteLLM_SpendLogs
             )
         accepted: Final = accepted_ids - charged_by_legacy
         local_rows: Final = tuple(
-            {key: value for key, value in row.items() if key not in _ACCOUNTING_ONLY_FIELDS}
+            spend_log_columns(row)
             for row in rows
             if _delivery_id(row) in accepted and row.get("accounting_log_disabled") is not True
         )

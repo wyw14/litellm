@@ -1,6 +1,6 @@
 import math
-from contextlib import asynccontextmanager
 from collections.abc import Awaitable, Callable
+from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
@@ -8,6 +8,7 @@ import pytest
 
 from litellm.proxy.db.budget_window_spend_writer import (
     WindowSeedTotals,
+    apply_window_spend_updates,
     commit_window_spend_updates,
     open_window_spend_row,
     roll_window_spend_row,
@@ -95,6 +96,7 @@ class _RecordingAggregate:
         entity_id: str,
         window_start: datetime,
         batch_started_at: datetime | None,
+        query: Any = None,
     ) -> WindowSeedTotals | None:
         self.calls.append(
             {
@@ -122,6 +124,7 @@ class _SpendLogsFake:
         entity_id: str,
         window_start: datetime,
         batch_started_at: datetime | None,
+        query: Any = None,
     ) -> WindowSeedTotals | None:
         return WindowSeedTotals(
             total=math.fsum(spend for _request_id, spend, _started_at in self.rows),
@@ -354,7 +357,7 @@ async def test_unknown_entity_type_contributes_no_seed():
     anything else starts from its increment alone."""
     db = _FakeDB(existing_rows=[])
 
-    async def no_such_column(prisma_client, entity_type, entity_id, window_start, batch_started_at):
+    async def no_such_column(prisma_client, entity_type, entity_id, window_start, batch_started_at, query=None):
         return None
 
     await commit_window_spend_updates(
@@ -371,7 +374,7 @@ async def test_unknown_entity_type_contributes_no_seed():
 async def test_unavailable_spend_logs_aggregate_seeds_zero_rather_than_failing():
     db = _FakeDB(existing_rows=[])
 
-    async def unavailable(prisma_client, entity_type, entity_id, window_start, batch_started_at):
+    async def unavailable(prisma_client, entity_type, entity_id, window_start, batch_started_at, query=None):
         return None
 
     await commit_window_spend_updates(
@@ -647,12 +650,10 @@ async def test_window_reads_inside_an_enclosing_transaction_use_its_connection()
     client_db = _FakeDB()
     transaction = _FakeDB(existing_rows=[])
 
-    await commit_window_spend_updates(
-        prisma_client=_FakePrismaClient(client_db),
-        transactions=(
-            build_window_spend_transaction("key", "k1", "30d", WINDOW_A, 1.0, started_at=BATCH_STARTED_AT),
-        ),
-        outer_transaction=transaction,
+    await apply_window_spend_updates(
+        transaction,
+        _FakePrismaClient(client_db),
+        (build_window_spend_transaction("key", "k1", "30d", WINDOW_A, 1.0, started_at=BATCH_STARTED_AT),),
     )
 
     assert client_db.query_raw_calls == []

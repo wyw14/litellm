@@ -309,6 +309,7 @@ async def test_native_observation_enters_spend_pipeline_once_with_shared_daily_a
 ) -> None:
     import os
 
+    from litellm.accounting.payload import AccountingPayload
     from litellm.accounting.projection import project
     from litellm.proxy.common_utils.user_api_key_cache import UserApiKeyCache
     from litellm.proxy.db.db_spend_update_writer import DBSpendUpdateWriter
@@ -331,7 +332,7 @@ async def test_native_observation_enters_spend_pipeline_once_with_shared_daily_a
         ]
         actual_tags: Final = tuple(
             item
-            for item in project({**payload, "metadata": json.loads(payload["metadata"])})
+            for item in project(AccountingPayload.model_validate(payload))
             if item.table == "LiteLLM_DailyTagSpend"
         )
         assert len(actual_tags) == 1

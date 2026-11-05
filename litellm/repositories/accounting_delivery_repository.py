@@ -7,10 +7,11 @@ from typing import TYPE_CHECKING, Final, Literal, Protocol
 
 from pydantic import BaseModel, ConfigDict, TypeAdapter
 
+from litellm.accounting.payload import AccountingPayload
 from litellm.repositories.prisma_protocols import TableActions
 
 if TYPE_CHECKING:
-    from litellm.proxy.db.db_spend_update_writer import SpendBatchManager
+    from litellm.accounting.entity_spend import SpendBatchManager
 
 
 class LedgerTransaction(Protocol):
@@ -48,11 +49,6 @@ class _ClaimedDelivery(_Delivery):
 
 
 @dataclass(frozen=True, slots=True)
-class DeliveryProjection:
-    row: Mapping[str, object]
-
-
-@dataclass(frozen=True, slots=True)
 class DeliveryBatchResult:
     applied: int = 0
     failed: int = 0
@@ -72,7 +68,6 @@ class DeliveryMetrics(BaseModel):
 
 _DELIVERIES: Final = TypeAdapter(tuple[_Delivery, ...])
 _CLAIMED: Final = TypeAdapter(tuple[_ClaimedDelivery, ...])
-_PAYLOAD: Final = TypeAdapter(dict[str, object])
 _TIMEOUT: Final = timedelta(seconds=60)
 _CLAIM: Final = """SELECT delivery_id, attempts, accounting_payload::text AS accounting_payload
 FROM "LiteLLM_SpendLogDelivery"
@@ -93,9 +88,9 @@ SET state = 'parked', attempts = attempts + 1, last_error = 'UndecodablePayload'
 WHERE delivery_id = ANY($1::text[]) AND state = 'pending'"""
 
 
-def _decoded(delivery: _ClaimedDelivery) -> DeliveryProjection | None:
+def _decoded(delivery: _ClaimedDelivery) -> AccountingPayload | None:
     try:
-        return DeliveryProjection(_PAYLOAD.validate_json(delivery.accounting_payload))
+        return AccountingPayload.model_validate_json(delivery.accounting_payload)
     except ValueError:
         return None
 
@@ -141,7 +136,7 @@ class AccountingDeliveryRepository:
 
     async def apply_pending(
         self,
-        apply: Callable[[LedgerTransaction, tuple[DeliveryProjection, ...]], Awaitable[None]],
+        apply: Callable[[LedgerTransaction, tuple[AccountingPayload, ...]], Awaitable[None]],
         *,
         batch_size: int = 100,
         max_attempts: int = 5,

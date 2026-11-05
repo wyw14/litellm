@@ -2004,23 +2004,6 @@ from litellm.proxy.utils import ProxyUpdateSpend
 
 
 @pytest.mark.asyncio
-async def test_end_user_transactions_reset():
-    # Setup
-    mock_client = MagicMock()
-    end_user_list_transactions = {"1": 10.0}  # Bad log
-    mock_client.db.tx = AsyncMock(side_effect=Exception("DB Error"))
-
-    # Call function - should raise error
-    with pytest.raises(TypeError):
-        await ProxyUpdateSpend.update_end_user_spend(
-            n_retry_times=0,
-            prisma_client=mock_client,
-            proxy_logging_obj=MagicMock(),
-            end_user_list_transactions=end_user_list_transactions,
-        )
-
-
-@pytest.mark.asyncio
 async def test_spend_logs_cleanup_after_error():
     # Setup test data
     import asyncio

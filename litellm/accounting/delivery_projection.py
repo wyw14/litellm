@@ -1,10 +1,9 @@
 from collections.abc import Iterable
 from itertools import chain, groupby
-from typing import TYPE_CHECKING, Final
-from urllib.parse import quote
+from typing import Final
 
+from litellm.accounting.payload import AccountingPayload
 from litellm.accounting.projection import Contribution, project
-from litellm.repositories.accounting_delivery_repository import DeliveryProjection
 
 
 def _destination(contribution: Contribution) -> tuple[str, tuple[tuple[str, str], ...], str]:
@@ -36,43 +35,6 @@ def _sum(contributions: tuple[Contribution, ...]) -> Contribution:
     return Contribution(first.table, first.key, increments, values)
 
 
-def project_deliveries(deliveries: Iterable[DeliveryProjection]) -> tuple[Contribution, ...]:
-    ordered: Final = sorted(chain.from_iterable(project(delivery.row) for delivery in deliveries), key=_destination)
+def project_deliveries(deliveries: Iterable[AccountingPayload]) -> tuple[Contribution, ...]:
+    ordered: Final = sorted(chain.from_iterable(project(delivery) for delivery in deliveries), key=_destination)
     return tuple(_sum(tuple(group)) for _, group in groupby(ordered, key=_destination))
-
-
-def entity_transactions(contributions: tuple[Contribution, ...]) -> "DBSpendUpdateTransactions":
-    return {
-        "user_list_transactions": dict(_entity_totals(contributions, "LiteLLM_UserTable")),
-        "end_user_list_transactions": dict(_entity_totals(contributions, "LiteLLM_EndUserTable")),
-        "key_list_transactions": dict(_entity_totals(contributions, "LiteLLM_VerificationToken")),
-        "team_list_transactions": dict(_entity_totals(contributions, "LiteLLM_TeamTable")),
-        "team_member_list_transactions": dict(_entity_totals(contributions, "LiteLLM_TeamMembership")),
-        "org_list_transactions": dict(_entity_totals(contributions, "LiteLLM_OrganizationTable")),
-        "org_member_list_transactions": dict(_entity_totals(contributions, "LiteLLM_OrganizationMembership")),
-        "project_list_transactions": dict(_entity_totals(contributions, "LiteLLM_ProjectTable")),
-        "tag_list_transactions": dict(_entity_totals(contributions, "LiteLLM_TagTable")),
-        "agent_list_transactions": dict(_entity_totals(contributions, "LiteLLM_AgentsTable")),
-        "model_access_group_list_transactions": dict(
-            _entity_totals(contributions, "LiteLLM_ModelAccessGroupBudgetTable")
-        ),
-    }
-
-
-def _entity_totals(contributions: tuple[Contribution, ...], table: str) -> tuple[tuple[str, float], ...]:
-    return tuple(
-        (_entity_key(item), float(dict(item.increments)["spend"])) for item in contributions if item.table == table
-    )
-
-
-def _entity_key(item: Contribution) -> str:
-    fields: Final = dict(item.key)
-    if item.table == "LiteLLM_TeamMembership":
-        return f"team_id::{fields['team_id']}::user_id::{fields['user_id']}"
-    if item.table == "LiteLLM_OrganizationMembership":
-        return f"org_id::{quote(fields['organization_id'], safe='')}::user_id::{quote(fields['user_id'], safe='')}"
-    return item.key[0][1]
-
-
-if TYPE_CHECKING:
-    from litellm.proxy._types import DBSpendUpdateTransactions

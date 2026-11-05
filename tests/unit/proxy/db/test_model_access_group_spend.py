@@ -4,10 +4,10 @@ from collections.abc import Mapping, Sequence
 
 import pytest
 
+from litellm.accounting.payload import AccountingPayload
 from litellm.accounting.projection import project
 from litellm.litellm_core_utils.internal_call_metadata import MODEL_ACCESS_GROUP_METADATA_KEY
-from litellm.proxy._types import DBSpendUpdateTransactions
-from litellm.proxy.db.db_spend_update_writer import DBSpendUpdateWriter, debitable_model_access_groups
+from litellm.proxy.db.db_spend_update_writer import debitable_model_access_groups
 from litellm.proxy.spend_tracking.spend_tracking_utils import get_request_model_access_groups
 
 
@@ -74,34 +74,6 @@ class _FakeTransaction:
         return False
 
 
-class _FakeDb:
-    def __init__(self, batcher: _FakeBatcher) -> None:
-        self._batcher = batcher
-
-    def tx(self, timeout: object = None) -> _FakeTransaction:
-        return _FakeTransaction(self._batcher)
-
-
-class _FakePrismaClient:
-    def __init__(self) -> None:
-        self.batcher = _FakeBatcher()
-        self.db = _FakeDb(self.batcher)
-
-
-def _empty_transactions(**overrides: dict[str, float]) -> DBSpendUpdateTransactions:
-    return DBSpendUpdateTransactions(
-        user_list_transactions=overrides.get("user_list_transactions", {}),
-        end_user_list_transactions=overrides.get("end_user_list_transactions", {}),
-        key_list_transactions=overrides.get("key_list_transactions", {}),
-        team_list_transactions=overrides.get("team_list_transactions", {}),
-        team_member_list_transactions=overrides.get("team_member_list_transactions", {}),
-        org_list_transactions=overrides.get("org_list_transactions", {}),
-        tag_list_transactions=overrides.get("tag_list_transactions", {}),
-        agent_list_transactions=overrides.get("agent_list_transactions", {}),
-        model_access_group_list_transactions=overrides.get("model_access_group_list_transactions", {}),
-    )
-
-
 # --- enqueue ---------------------------------------------------------------
 
 
@@ -112,7 +84,7 @@ def _group_spend(
     row = {"request_id": "r", "spend": spend, "metadata": {"accounting_model_access_groups": list(groups)}}
     return [
         (dict(item.key)["access_group_name"], dict(item.increments)["spend"])
-        for item in project(row)
+        for item in project(AccountingPayload.model_validate(row))
         if item.table == "LiteLLM_ModelAccessGroupBudgetTable"
     ]
 
@@ -306,26 +278,6 @@ def test_missing_metadata_yields_no_groups():
 
 
 # --- flush to postgres -----------------------------------------------------
-
-
-@pytest.mark.asyncio
-async def test_commit_increments_spend_on_the_model_access_group_budget_table():
-    prisma_client = _FakePrismaClient()
-
-    await DBSpendUpdateWriter()._commit_spend_updates_to_db(
-        prisma_client=prisma_client,
-        n_retry_times=0,
-        proxy_logging_obj=None,
-        db_spend_update_transactions=_empty_transactions(
-            model_access_group_list_transactions={"pool-b": 0.5, "pool-a": 0.25}
-        ),
-    )
-
-    assert prisma_client.batcher.tables["litellm_modelaccessgroupbudgettable"].calls == [
-        ({"access_group_name": "pool-a"}, {"spend": {"increment": 0.25}}),
-        ({"access_group_name": "pool-b"}, {"spend": {"increment": 0.5}}),
-    ]
-    assert "litellm_tagtable" not in prisma_client.batcher.tables
 
 
 # --- end-to-end through the batched fan-out --------------------------------

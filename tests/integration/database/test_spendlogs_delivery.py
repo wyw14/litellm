@@ -10,9 +10,9 @@ import pytest
 import pytest_asyncio
 from prisma import Prisma
 
+from litellm.accounting.payload import AccountingPayload
 from litellm.repositories.accounting_delivery_repository import (
     AccountingDeliveryRepository,
-    DeliveryProjection,
     LedgerTransaction,
 )
 from litellm.repositories.spend_log_insert import spend_log_insert_statement
@@ -109,7 +109,7 @@ async def test_delivery_first_acceptance_deduplicates_all_storage_modes(
         delivery_database.execute('DELETE FROM "LiteLLM_SpendLogs"')
 
     async def apply(transaction, deliveries):
-        await transaction.execute_raw("UPDATE totals SET spend = spend + $1::float8", float(deliveries[0].row["spend"]))
+        await transaction.execute_raw("UPDATE totals SET spend = spend + $1::float8", deliveries[0].spend)
 
     worker = AccountingDeliveryRepository(delivery_client)
     assert (await worker.apply_pending(apply)).applied == 1
@@ -188,11 +188,9 @@ async def test_worker_rolls_back_destinations_and_parks_only_isolated_failure(
     delivery_database.execute("INSERT INTO totals VALUES (0)")
     _insert(delivery_database, (_row("bad"), _row("good")))
 
-    async def apply(transaction: LedgerTransaction, rows: tuple[DeliveryProjection, ...]) -> None:
-        await transaction.execute_raw(
-            "UPDATE totals SET spend = spend + $1::float8", sum(float(str(row.row["spend"])) for row in rows)
-        )
-        if any(row.row["request_id"] == "bad" for row in rows):
+    async def apply(transaction: LedgerTransaction, rows: tuple[AccountingPayload, ...]) -> None:
+        await transaction.execute_raw("UPDATE totals SET spend = spend + $1::float8", sum(row.spend for row in rows))
+        if any(row.request_id == "bad" for row in rows):
             raise ValueError("Invalid projected destination")
 
     await client.connect()
@@ -226,7 +224,7 @@ async def test_a_locked_database_never_parks_a_valid_delivery(delivery_database,
     async def apply(transaction, deliveries):
         await transaction.execute_raw("SET LOCAL lock_timeout = '50ms'")
         await transaction.execute_raw(
-            "UPDATE totals SET spend = spend + $1::float8", sum(float(row.row["spend"]) for row in deliveries)
+            "UPDATE totals SET spend = spend + $1::float8", sum(row.spend for row in deliveries)
         )
 
     repository = AccountingDeliveryRepository(delivery_client)
@@ -287,11 +285,11 @@ async def test_two_workers_claim_disjoint_rows_and_apply_once(
     entered: Final[asyncio.Queue[str]] = asyncio.Queue()
     release: Final = asyncio.Event()
 
-    async def apply(transaction: LedgerTransaction, rows: tuple[DeliveryProjection, ...]) -> None:
+    async def apply(transaction: LedgerTransaction, rows: tuple[AccountingPayload, ...]) -> None:
         assert len(rows) == 1
-        await entered.put(str(rows[0].row["request_id"]))
+        await entered.put(rows[0].request_id)
         await release.wait()
-        await transaction.execute_raw("UPDATE totals SET spend = spend + $1::float8", float(str(rows[0].row["spend"])))
+        await transaction.execute_raw("UPDATE totals SET spend = spend + $1::float8", rows[0].spend)
 
     repository: Final = AccountingDeliveryRepository(delivery_client)
     first: Final = asyncio.create_task(repository.apply_pending(apply, batch_size=1))
@@ -319,8 +317,8 @@ async def test_cancelled_worker_rolls_back_and_restart_applies_once(
     wrote: Final = asyncio.Event()
     hold: Final = asyncio.Event()
 
-    async def interrupted(transaction: LedgerTransaction, rows: tuple[DeliveryProjection, ...]) -> None:
-        await transaction.execute_raw("UPDATE totals SET spend = spend + $1::float8", float(str(rows[0].row["spend"])))
+    async def interrupted(transaction: LedgerTransaction, rows: tuple[AccountingPayload, ...]) -> None:
+        await transaction.execute_raw("UPDATE totals SET spend = spend + $1::float8", rows[0].spend)
         wrote.set()
         await hold.wait()
 
@@ -336,8 +334,8 @@ async def test_cancelled_worker_rolls_back_and_restart_applies_once(
         0,
     )
 
-    async def complete(transaction: LedgerTransaction, rows: tuple[DeliveryProjection, ...]) -> None:
-        await transaction.execute_raw("UPDATE totals SET spend = spend + $1::float8", float(str(rows[0].row["spend"])))
+    async def complete(transaction: LedgerTransaction, rows: tuple[AccountingPayload, ...]) -> None:
+        await transaction.execute_raw("UPDATE totals SET spend = spend + $1::float8", rows[0].spend)
 
     assert (await repository.apply_pending(complete)).applied == 1
     assert (await repository.apply_pending(complete)).applied == 0
@@ -351,8 +349,8 @@ async def test_worker_applies_accounting_after_spend_logs_are_deleted(
     _insert(delivery_database, (_row("removed"),))
     delivery_database.execute('DELETE FROM "LiteLLM_SpendLogs"')
 
-    async def apply(transaction: LedgerTransaction, rows: tuple[DeliveryProjection, ...]) -> None:
-        await transaction.execute_raw("UPDATE totals SET spend = spend + $1::float8", float(str(rows[0].row["spend"])))
+    async def apply(transaction: LedgerTransaction, rows: tuple[AccountingPayload, ...]) -> None:
+        await transaction.execute_raw("UPDATE totals SET spend = spend + $1::float8", rows[0].spend)
 
     repository: Final = AccountingDeliveryRepository(delivery_client)
     assert (await repository.apply_pending(apply)).applied == 1
@@ -441,7 +439,7 @@ async def test_a_payload_the_engine_cannot_decode_never_blocks_other_deliveries(
 
     async def apply(transaction, deliveries):
         await transaction.execute_raw(
-            "UPDATE totals SET spend = spend + $1::float8", sum(float(row.row["spend"]) for row in deliveries)
+            "UPDATE totals SET spend = spend + $1::float8", sum(row.spend for row in deliveries)
         )
 
     repository = AccountingDeliveryRepository(delivery_client)

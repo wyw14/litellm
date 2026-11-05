@@ -23,7 +23,6 @@ from litellm.proxy.utils import PrismaClient
 from litellm.repositories.prisma_protocols import TableActions
 from litellm.repositories.table_repositories import (
     DailyGuardrailMetricsRepository,
-    DailyGuardrailUsageUnitsRepository,
     SpendLogGuardrailIndexRepository,
 )
 
@@ -221,10 +220,7 @@ class GuardrailUsageDatabase(Protocol):
 
 
 async def upsert_usage_unit_row(
-    prisma_client: PrismaClient,
-    key: UsageUnitKey,
-    increment: UsageUnitIncrement,
-    outer_transaction: GuardrailUsageDatabase | None = None,
+    transaction: GuardrailUsageDatabase, key: UsageUnitKey, increment: UsageUnitIncrement
 ) -> None:
     row: Final[prisma_types.LiteLLM_DailyGuardrailUsageUnitsCreateInput] = {
         "guardrail_id": key.guardrail_id,
@@ -254,12 +250,7 @@ async def upsert_usage_unit_row(
             "untracked_units": {"increment": increment.untracked_units},
         },
     }
-    table: Final = (
-        outer_transaction.litellm_dailyguardrailusageunits
-        if outer_transaction is not None
-        else DailyGuardrailUsageUnitsRepository(prisma_client).table
-    )
-    await table.upsert(where=where, data=data)
+    await transaction.litellm_dailyguardrailusageunits.upsert(where=where, data=data)
 
 
 async def _upsert_metrics_row(prisma_client: PrismaClient, key: _MetricsKey, agg: Mapping[str, int]) -> None:

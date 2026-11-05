@@ -272,17 +272,12 @@ async def test_attempt_rows_add_spend_but_not_requests_to_daily_spend():
     payloads = await _spend_log_payloads_of_a_retried_timeout_across_a_fallback()
     projected = [
         project(
-            json.loads(
-                json.dumps(
-                    build_accounting_payload(
-                        payload,
-                        entities={"api_key": "hashed-key", "user": "user-1"},
-                        model_access_groups=(),
-                        windows=(),
-                        router=lambda: None,
-                    ),
-                    default=str,
-                )
+            build_accounting_payload(
+                payload,
+                entities={"api_key": "hashed-key", "user": "user-1"},
+                model_access_groups=(),
+                windows=(),
+                router=lambda: None,
             )
         )
         for payload in payloads

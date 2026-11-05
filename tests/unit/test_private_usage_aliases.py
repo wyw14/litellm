@@ -2989,13 +2989,6 @@ PROXY_ALIAS_CASES: Final = (
         False,
     ),
     (
-        'litellm.proxy.db.db_spend_update_writer',
-        'DBSpendUpdateWriter',
-        '_handle_spend_update_failure',
-        'handle_spend_update_failure',
-        False,
-    ),
-    (
         'litellm.proxy.db.db_transaction_queue.redis_update_buffer',
         'RedisUpdateBuffer',
         '_should_commit_spend_updates_to_redis',

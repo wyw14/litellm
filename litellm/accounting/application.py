@@ -1,33 +1,29 @@
 from typing import TYPE_CHECKING, Final
 
-from litellm.accounting.delivery_projection import entity_transactions, project_deliveries
+from litellm.accounting.delivery_projection import project_deliveries
+from litellm.accounting.entity_spend import apply_entity_spend
+from litellm.accounting.payload import AccountingPayload
 from litellm.accounting.projection import Contribution
-from litellm.proxy.db.budget_window_spend_writer import commit_window_spend_updates
+from litellm.proxy.db.budget_window_spend_writer import apply_window_spend_updates
 from litellm.proxy.db.daily_spend_bulk_upsert import DAILY_SPEND_TABLES, build_bulk_upsert, merge_by_conflict_key
 from litellm.proxy.db.db_span import db_span
 from litellm.proxy.db.db_transaction_queue.window_spend_update_queue import WindowSpendTransaction
 from litellm.proxy.db.model_usage_rollup import queue_model_usage_upsert
-from litellm.repositories.accounting_delivery_repository import DeliveryProjection, LedgerTransaction
+from litellm.repositories.accounting_delivery_repository import LedgerTransaction
 
 if TYPE_CHECKING:
-    from litellm.proxy.db.db_spend_update_writer import DBSpendUpdateWriter
-    from litellm.proxy.utils import PrismaClient, ProxyLogging
+    from litellm.proxy.utils import PrismaClient
+
+_DAILY_STATEMENT_ROWS: Final = 100
 
 
 async def apply_deliveries(
-    transaction: LedgerTransaction,
-    deliveries: tuple[DeliveryProjection, ...],
-    *,
-    prisma_client: "PrismaClient",
-    writer: "DBSpendUpdateWriter",
-    proxy_logging_obj: "ProxyLogging",
+    transaction: LedgerTransaction, deliveries: tuple[AccountingPayload, ...], *, prisma_client: "PrismaClient"
 ) -> tuple[Contribution, ...]:
     from litellm.proxy.guardrails.usage_tracking import UsageUnitIncrement, UsageUnitKey, upsert_usage_unit_row
 
     contributions: Final = project_deliveries(deliveries)
-    await writer.apply_accounting_entities(
-        prisma_client, proxy_logging_obj, transaction, entity_transactions(contributions)
-    )
+    await apply_entity_spend(transaction, contributions)
     for table in sorted(DAILY_SPEND_TABLES.values(), key=lambda item: item.name):
         rows = tuple(
             {**dict(item.key), **dict(item.values), **dict(item.increments)}
@@ -35,8 +31,8 @@ async def apply_deliveries(
             if item.table == table.name
         )
         merged = merge_by_conflict_key(table, rows)
-        for offset in range(0, len(merged), 100):
-            sql, params = build_bulk_upsert(table, merged[offset : offset + 100])
+        for offset in range(0, len(merged), _DAILY_STATEMENT_ROWS):
+            sql, params = build_bulk_upsert(table, merged[offset : offset + _DAILY_STATEMENT_ROWS])
             async with db_span("upsert_daily_spend", table.name):
                 await transaction.execute_raw(sql, *params)
     async with transaction.batch_() as batcher:
@@ -48,13 +44,12 @@ async def apply_deliveries(
             key = dict(item.key)
             counters = dict(item.increments)
             await upsert_usage_unit_row(
-                prisma_client,
+                transaction,
                 UsageUnitKey(key["guardrail_id"], key["date"], key["team_id"], key["api_key"], key["usage_unit"]),
                 UsageUnitIncrement(int(counters["units"]), float(counters["cost"]), int(counters["untracked_units"])),
-                outer_transaction=transaction,
             )
     windows: Final = tuple(_window(item) for item in contributions if item.table == "LiteLLM_BudgetWindowSpend")
-    await commit_window_spend_updates(prisma_client, windows, outer_transaction=transaction)
+    await apply_window_spend_updates(transaction, prisma_client, windows)
     return contributions
 
 
